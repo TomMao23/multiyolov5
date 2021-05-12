@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def train(hyp, opt, device, tb_writer=None):
-    logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
+    logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))  # 打印超参数
     save_dir, epochs, batch_size, total_batch_size, weights, rank = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank
 
@@ -50,7 +50,7 @@ def train(hyp, opt, device, tb_writer=None):
     best = wdir / 'best.pt'
     results_file = save_dir / 'results.txt'
 
-    # Save run settings
+    # Save run settings # 存超参数和优化器参数, 优化器参数,可用于resume
     with open(save_dir / 'hyp.yaml', 'w') as f:
         yaml.dump(hyp, f, sort_keys=False)
     with open(save_dir / 'opt.yaml', 'w') as f:
@@ -66,7 +66,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Logging- Doing this before checking the dataset. Might update data_dict
     loggers = {'wandb': None}  # loggers dict
-    if rank in [-1, 0]:
+    if rank in [-1, 0]:  # -1不开DDP, 0是主进程
         opt.hyp = hyp  # add hyperparameters
         run_id = torch.load(weights).get('wandb_id') if weights.endswith('.pt') and os.path.isfile(weights) else None
         wandb_logger = WandbLogger(opt, Path(opt.save_dir).stem, run_id, data_dict)
@@ -80,38 +80,39 @@ def train(hyp, opt, device, tb_writer=None):
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
 
     # Model
-    pretrained = weights.endswith('.pt')
-    if pretrained:
+    pretrained = weights.endswith('.pt')  # 有weights输入就用其初始化
+    if pretrained:  # 有预训练参数
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
         model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-        exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys
-        state_dict = ckpt['model'].float().state_dict()  # to FP32
-        state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
-        model.load_state_dict(state_dict, strict=False)  # load
+        exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys 初始化时候不使用的参数(非resume且有配置时按cfg和model初始化来指定anchor, 否则延用pretrained weights的anchor)
+        state_dict = ckpt['model'].float().state_dict()  # to FP32 ckpt里model键对应的值才是模型,训练结束后保存的是float16(中间保存的float32),模型的state_dict是参数,包括可训练参数和register_buffer保存的buffer parameter(Detect的anchor和gird等)
+        state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect 赋值参数,预训练的参数赋值到新建的模型,exclude除外(即anchor使用cfg的而不是预训练)
+        model.load_state_dict(state_dict, strict=False)  # load 调整好的预训练参数加载到模型
         logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
-    else:
+    else:  # 无预训练参数,只建模型
         model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
     train_path = data_dict['train']
     test_path = data_dict['val']
 
-    # Freeze
+    # Freeze 要冻结的参数 似乎只能在此代码处手动设置列表
     freeze = []  # parameter names to freeze (full or partial)
     for k, v in model.named_parameters():
-        v.requires_grad = True  # train all layers
-        if any(x in k for x in freeze):
+        v.requires_grad = True  # train all layers 全部参数可导
+        if any(x in k for x in freeze):  # 碰见freeze列表的层使其参数不可导
             print('freezing %s' % k)
             v.requires_grad = False
 
     # Optimizer
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
-    hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
+    hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay 权重衰减系数
     logger.info(f"Scaled weight_decay = {hyp['weight_decay']}")
 
+    # 参数分组,pg0是BN,pg1是权重,pg2是偏置
     pg0, pg1, pg2 = [], [], []  # optimizer parameter groups
     for k, v in model.named_modules():
         if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
@@ -120,27 +121,28 @@ def train(hyp, opt, device, tb_writer=None):
             pg0.append(v.weight)  # no decay
         elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):
             pg1.append(v.weight)  # apply decay
-
+    # 优化器初始化, BN层参数不带权重衰减
     if opt.adam:
         optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
     else:
         optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
-
+    # 权重参数, 带权重衰减
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
+    # 偏置参数, 同样不带衰减
     optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
     logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
     del pg0, pg1, pg2
 
-    # Scheduler https://arxiv.org/pdf/1812.01187.pdf
+    # Scheduler https://arxiv.org/pdf/1812.01187.pdf 设置好优化器后用其设置Learning Scheduler
     # https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html#OneCycleLR
     if opt.linear_lr:
         lf = lambda x: (1 - x / (epochs - 1)) * (1.0 - hyp['lrf']) + hyp['lrf']  # linear
     else:
         lf = one_cycle(1, hyp['lrf'], epochs)  # cosine 1->hyp['lrf']
-    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # 自定义lambda函数学习率衰减策略
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
-    # EMA
+    # EMA 指数滑动平均
     ema = ModelEMA(model) if rank in [-1, 0] else None
 
     # Resume
@@ -151,7 +153,7 @@ def train(hyp, opt, device, tb_writer=None):
             optimizer.load_state_dict(ckpt['optimizer'])
             best_fitness = ckpt['best_fitness']
 
-        # EMA
+        # EMA 指数平均
         if ema and ckpt.get('ema'):
             ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
             ema.updates = ckpt['updates']
@@ -161,10 +163,10 @@ def train(hyp, opt, device, tb_writer=None):
             results_file.write_text(ckpt['training_results'])  # write results.txt
 
         # Epochs
-        start_epoch = ckpt['epoch'] + 1
-        if opt.resume:
+        start_epoch = ckpt['epoch'] + 1  # 预训练模型的epoch是-1
+        if opt.resume:  # resume参数epoch应该大于0
             assert start_epoch > 0, '%s training to %g epochs is finished, nothing to resume.' % (weights, epochs)
-        if epochs < start_epoch:
+        if epochs < start_epoch:  # 总轮数比开始轮还小, 总轮数加上已训练轮(即再训练总轮数次而不是通常的 总轮数-开始轮 次)
             logger.info('%s has been trained for %g epochs. Fine-tuning for %g additional epochs.' %
                         (weights, ckpt['epoch'], epochs))
             epochs += ckpt['epoch']  # finetune additional epochs
@@ -172,15 +174,15 @@ def train(hyp, opt, device, tb_writer=None):
         del ckpt, state_dict
 
     # Image sizes
-    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
-    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
+    gs = max(int(model.stride.max()), 32)  # grid size (max stride)  至少32
+    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj']) model最后一层是Detect, nl是其输出层数量
+    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples 检查图片尺寸是否合法,不合法就自动替换
 
-    # DP mode
+    # DP mode DP多线程数据并行模式, 不使用, 并行推荐DDP多进程
     if cuda and rank == -1 and torch.cuda.device_count() > 1:
         model = torch.nn.DataParallel(model)
 
-    # SyncBatchNorm
+    # SyncBatchNorm 跨卡BN, 仅支持DDP
     if opt.sync_bn and cuda and rank != -1:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
         logger.info('Using SyncBatchNorm()')
@@ -190,18 +192,19 @@ def train(hyp, opt, device, tb_writer=None):
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
+    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class 纵向连接了标签后找第一列最大值, mlc的值就是类别数-1
     nb = len(dataloader)  # number of batches
+    # mlc=实际标签类别数-1 应该小于 nc模型结构支持的前景类别数 (不用等式关系, 因为结构类别多的模型可以支持训练标签类别少的数据, 反之不成立)
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
-    # Process 0
+    # Process 0  非DDP或DDP中的主进程
     if rank in [-1, 0]:
-        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
+        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader batch_size翻倍
                                        hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
                                        world_size=opt.world_size, workers=opt.workers,
-                                       pad=0.5, prefix=colorstr('val: '))[0]
+                                       pad=0.5, prefix=colorstr('val: '))[0]  # [0]只要了loader没要dataset, 和train处理不一样
 
-        if not opt.resume:
+        if not opt.resume:  # 常规, 非resume
             labels = np.concatenate(dataset.labels, 0)
             c = torch.tensor(labels[:, 0])  # classes
             # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
@@ -491,50 +494,51 @@ if __name__ == '__main__':
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
     opt = parser.parse_args()
 
-    # Set DDP variables
-    opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
-    opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1
+    # Set DDP variables  DDP常规初始化
+    opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1  # 获取总进程数world_size
+    opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1  # global_rank是所有进程可用的GPU号, local_rank是当前进程对应GPU号
     set_logging(opt.global_rank)
     if opt.global_rank in [-1, 0]:
-        #check_git_status()
+        # check_git_status()  # 检测git版本,网络不好会卡住,手动关闭
         check_requirements()
 
     # Resume
-    wandb_run = check_wandb_resume(opt)
+    wandb_run = check_wandb_resume(opt)  # wandb有bug,没装
+    # 断点重续且没有wandb库
     if opt.resume and not wandb_run:  # resume an interrupted run
-        ckpt = opt.resume if isinstance(opt.resume, str) else get_latest_run()  # specified or most recent path
+        ckpt = opt.resume if isinstance(opt.resume, str) else get_latest_run()  # specified or most recent path 找要续的模型pt
         assert os.path.isfile(ckpt), 'ERROR: --resume checkpoint does not exist'
         apriori = opt.global_rank, opt.local_rank
-        with open(Path(ckpt).parent.parent / 'opt.yaml') as f:
+        with open(Path(ckpt).parent.parent / 'opt.yaml') as f:  # 找 优化器 配置文件
             opt = argparse.Namespace(**yaml.load(f, Loader=yaml.SafeLoader))  # replace
         opt.cfg, opt.weights, opt.resume, opt.batch_size, opt.global_rank, opt.local_rank = '', ckpt, True, opt.total_batch_size, *apriori  # reinstate
         logger.info('Resuming training from %s' % ckpt)
     else:
         # opt.hyp = opt.hyp or ('hyp.finetune.yaml' if opt.weights else 'hyp.scratch.yaml')
         opt.data, opt.cfg, opt.hyp = check_file(opt.data), check_file(opt.cfg), check_file(opt.hyp)  # check files
-        assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
+        assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'  # cfg和weights至少有一个
         opt.img_size.extend([opt.img_size[-1]] * (2 - len(opt.img_size)))  # extend to 2 sizes (train, test)
-        opt.name = 'evolve' if opt.evolve else opt.name
+        opt.name = 'evolve' if opt.evolve else opt.name  # project名字,用于保存文件夹
         opt.save_dir = increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok | opt.evolve)  # increment run
 
-    # DDP mode
-    opt.total_batch_size = opt.batch_size
-    device = select_device(opt.device, batch_size=opt.batch_size)
-    if opt.local_rank != -1:
+    # DDP mode 数据并行
+    opt.total_batch_size = opt.batch_size  # 总batchsize
+    device = select_device(opt.device, batch_size=opt.batch_size)  # 设备数
+    if opt.local_rank != -1:  # 默认是-1不开启DDP
         assert torch.cuda.device_count() > opt.local_rank
         torch.cuda.set_device(opt.local_rank)
         device = torch.device('cuda', opt.local_rank)
-        dist.init_process_group(backend='nccl', init_method='env://')  # distributed backend
-        assert opt.batch_size % opt.world_size == 0, '--batch-size must be multiple of CUDA device count'
-        opt.batch_size = opt.total_batch_size // opt.world_size
+        dist.init_process_group(backend='nccl', init_method='env://')  # distributed backend DDP初始化进程组
+        assert opt.batch_size % opt.world_size == 0, '--batch-size must be multiple of CUDA device count'  # 一般一卡开一进程, batchsize可被进程数整除
+        opt.batch_size = opt.total_batch_size // opt.world_size  # 每个进程batchsize
 
-    # Hyperparameters
+    # Hyperparameters 配置超参数
     with open(opt.hyp) as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)  # load hyps
 
     # Train
     logger.info(opt)
-    if not opt.evolve:
+    if not opt.evolve:  # 没有用进化算法(默认)
         tb_writer = None  # init loggers
         if opt.global_rank in [-1, 0]:
             prefix = colorstr('tensorboard: ')

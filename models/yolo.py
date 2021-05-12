@@ -21,6 +21,22 @@ except ImportError:
     thop = None
 
 
+class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征图同Detect
+    def __init__(self):
+        super(SegMask, self).__init__()
+
+    def forward(self, x):
+        pass
+
+
+class InstMask(nn.Module):  # TODO: 实例分割头, 计划尝试论文BoxInst的方法, 不使用实例分割标签
+    def __init__(self):
+        super(InstMask, self).__init__()
+
+    def forward(self, x):
+        pass
+
+
 class Detect(nn.Module):  # 检测头
     stride = None  # strides computed during build
     export = False  # onnx export
@@ -33,7 +49,7 @@ class Detect(nn.Module):  # 检测头
         self.na = len(anchors[0]) // 2  # number of anchors  内层列表表示该层anchor形状尺寸,//即该层anchor数
         self.grid = [torch.zeros(1)] * self.nl  # init grid
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
-        self.register_buffer('anchors', a)  # shape(nl,na,2) anchor参数是模型非计算图参数,用register_buffer保存
+        self.register_buffer('anchors', a)  # shape(nl,na,2) anchor参数是模型非计算图参数,用register_buffer保存(buffer parameter)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv 三个输出层输入通道不一样
 
@@ -209,19 +225,19 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
-        m = eval(m) if isinstance(m, str) else m  # eval strings 执行字符串表达式,block名转函数/类
+        m = eval(m) if isinstance(m, str) else m  # eval strings 执行字符串表达式,block名转函数/类,字符数字转数字
         for j, a in enumerate(args):
             try:
                 args[j] = eval(a) if isinstance(a, str) else a  # eval strings 同上,
             except:
                 pass
-        # yaml配置文件中num为1就1次,num>1就 num*depth_multiple次, 即此block重复次数(控制深度)
+        # n控制深度, yaml配置文件中num为1就1次,num>1就 num*depth_multiple次, 即此block本身以及block子结构重复次数
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
                  C3, C3TR]:
-            c1, c2 = ch[f], args[0]  # 指定层输入输出通道数
-            if c2 != no:  # if not output 不是输出层
-                c2 = make_divisible(c2 * gw, 8)  # 实际输出通道数是 配置的c2 * width_multiple 并向上取到可被8整除
+            c1, c2 = ch[f], args[0]  # 指定层输入输出通道数(ch记录各层输出通道,f表输入层下标,输入层的输出通道就是本层输入通道)
+            if c2 != no:  # if not output 对非输出层
+                c2 = make_divisible(c2 * gw, 8)  # 实际输出通道数是 配置文件的c2 * width_multiple 并向上取到可被8整除
 
             args = [c1, c2, *args[1:]]
             if m in [BottleneckCSP, C3, C3TR]:
@@ -232,8 +248,8 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         elif m is Concat:
             c2 = sum([ch[x] for x in f])  # Concat层, 输出通道就是几个输入层通道数相加
         elif m is Detect:
-            args.append([ch[x] for x in f])
-            if isinstance(args[1], int):  # number of anchors
+            args.append([ch[x] for x in f])  # 检测层, 把来源下标列表f中的层输出通道数加入args中, 用于构建Detect的卷积输入通道数
+            if isinstance(args[1], int):  # number of anchors 一般跑不进这句, args[1]是anchors在配置文件中已用列表写好, 非int
                 args[1] = [list(range(args[1] * 2))] * len(f)
         elif m is Contract:
             c2 = ch[f] * args[0] ** 2
@@ -242,7 +258,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         else:
             c2 = ch[f]
 
-        m_ = nn.Sequential(*[m(*args) for _ in range(n)]) if n > 1 else m(*args)  # module 深度不仅是block子结构重复次数, block本身也对应重复
+        m_ = nn.Sequential(*[m(*args) for _ in range(n)]) if n > 1 else m(*args)  # module 深度不仅是block子结构重复次数, block本身子结构(如C3的残差块)也对应重复
         t = str(m)[8:-2].replace('__main__.', '')  # module type
         np = sum([x.numel() for x in m_.parameters()])  # number params
         m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params

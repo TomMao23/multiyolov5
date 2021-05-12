@@ -29,6 +29,7 @@ def torch_distributed_zero_first(local_rank: int):
     """
     Decorator to make all processes in distributed training wait for each local_master to do something.
     """
+    # 不同进程数据同步, 如果不是 -1(禁用DDP) 0(DDP主进程)就barrier暂停等主进程
     if local_rank not in [-1, 0]:
         torch.distributed.barrier()
     yield
@@ -66,7 +67,7 @@ def select_device(device='', batch_size=None):
     cpu = device.lower() == 'cpu'
     if cpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # force torch.cuda.is_available() = False
-    elif device:  # non-cpu device requested
+    elif device:  # non-cpu device requested 默认是GPU
         os.environ['CUDA_VISIBLE_DEVICES'] = device  # set environment variable
         assert torch.cuda.is_available(), f'CUDA unavailable, invalid device {device} requested'  # check availability
 
