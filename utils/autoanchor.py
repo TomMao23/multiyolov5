@@ -38,16 +38,16 @@ def check_anchors(dataset, model, thr=4.0, imgsz=640):
         return bpr, aat
 
     anchors = m.anchor_grid.clone().cpu().view(-1, 2)  # current anchors
-    bpr, aat = metric(anchors)
+    bpr, aat = metric(anchors)  # 当前anchor设置的指标
     print(f'anchors/target = {aat:.2f}, Best Possible Recall (BPR) = {bpr:.4f}', end='')
-    if bpr < 0.98:  # threshold to recompute
+    if bpr < 0.98:  # threshold to recompute 达到0.98就不聚了, 达不到试着聚
         print('. Attempting to improve anchors, please wait...')
-        na = m.anchor_grid.numel() // 2  # number of anchors
-        try:
+        na = m.anchor_grid.numel() // 2  # number of anchors 获取旧anchor个数(正常9), 新旧anchor数保持不变(想改anchor数最好该yaml)
+        try:  # kmeans聚类训练集bbox取anchor
             anchors = kmean_anchors(dataset, n=na, img_size=imgsz, thr=thr, gen=1000, verbose=False)
         except Exception as e:
             print(f'{prefix}ERROR: {e}')
-        new_bpr = metric(anchors)[0]
+        new_bpr = metric(anchors)[0]  # 新anchor的指标, 变好就用新的, 没更好就用cfg设置的
         if new_bpr > bpr:  # replace anchors
             anchors = torch.tensor(anchors, device=m.anchors.device).type_as(m.anchors)
             m.anchor_grid[:] = anchors.clone().view_as(m.anchor_grid)  # for inference

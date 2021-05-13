@@ -57,7 +57,7 @@ def train(hyp, opt, device, tb_writer=None):
         yaml.dump(vars(opt), f, sort_keys=False)
 
     # Configure
-    plots = not opt.evolve  # create plots
+    plots = not opt.evolve  # create plots  不进化就画图
     cuda = device.type != 'cpu'
     init_seeds(2 + rank)
     with open(opt.data) as f:
@@ -66,7 +66,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Logging- Doing this before checking the dataset. Might update data_dict
     loggers = {'wandb': None}  # loggers dict
-    if rank in [-1, 0]:  # -1不开DDP, 0是主进程
+    if rank in [-1, 0]:  # -1不开DDP, 0是DDP主进程
         opt.hyp = hyp  # add hyperparameters
         run_id = torch.load(weights).get('wandb_id') if weights.endswith('.pt') and os.path.isfile(weights) else None
         wandb_logger = WandbLogger(opt, Path(opt.save_dir).stem, run_id, data_dict)
@@ -206,26 +206,26 @@ def train(hyp, opt, device, tb_writer=None):
 
         if not opt.resume:  # 常规, 非resume
             labels = np.concatenate(dataset.labels, 0)
-            c = torch.tensor(labels[:, 0])  # classes
+            c = torch.tensor(labels[:, 0])  # classes 所有对象类别(包括所有目标,不是图像)
             # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
             # model._initialize_biases(cf.to(device))
             if plots:
                 plot_labels(labels, names, save_dir, loggers)
                 if tb_writer:
-                    tb_writer.add_histogram('classes', c, 0)
+                    tb_writer.add_histogram('classes', c, 0)  #
 
             # Anchors
-            if not opt.noautoanchor:
-                check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
-            model.half().float()  # pre-reduce anchor precision
+            if not opt.noautoanchor:  # 用train dataset自动聚类选取最好anchor
+                check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)  # anchor_t是最大放大倍数,yolov5公式不同于v3v4, 见核心Model推理时anchor偏移放缩公式和issue
+            model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
     # DDP mode
-    if cuda and rank != -1:
+    if cuda and rank != -1:  # 没禁用(-1)就开DDP模型
         model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank,
                     # nn.MultiheadAttention incompatibility with DDP https://github.com/pytorch/pytorch/issues/26698
                     find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules()))
 
-    # Model parameters
+    # Model parameters 根据输出层数,类别数等调整损失增益,模型超参数
     hyp['box'] *= 3. / nl  # scale to layers
     hyp['cls'] *= nc / 80. * 3. / nl  # scale to classes and layers
     hyp['obj'] *= (imgsz / 640) ** 2 * 3. / nl  # scale to image size and layers
@@ -238,21 +238,21 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Start training
     t0 = time.time()
-    nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
+    nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations) 最多warmup1000batch
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
-    scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = amp.GradScaler(enabled=cuda)
-    compute_loss = ComputeLoss(model)  # init loss class
+    scheduler.last_epoch = start_epoch - 1  # do not move 配置lr_scheduler起始位置
+    scaler = amp.GradScaler(enabled=cuda)  # 说明不是float16训练,而是16和32混合精度训练. 训练前初始化loss scaler 用于float16放大梯度后backward, optimizer.step之前转float32再缩回来
+    compute_loss = ComputeLoss(model)  # init loss class 初始化criteria
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        model.train()
+        model.train()  # epoch开始, 确保train模式
 
-        # Update image weights (optional)
+        # Update image weights (optional) 更新image_weights权重, 默认不开image_weights
         if opt.image_weights:
             # Generate indices
             if rank in [-1, 0]:
@@ -272,28 +272,28 @@ def train(hyp, opt, device, tb_writer=None):
 
         mloss = torch.zeros(4, device=device)  # mean losses
         if rank != -1:
-            dataloader.sampler.set_epoch(epoch)
+            dataloader.sampler.set_epoch(epoch)  # shuffle时, 保证每个epoch顺序不同
         pbar = enumerate(dataloader)
         logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
         if rank in [-1, 0]:
-            pbar = tqdm(pbar, total=nb)  # progress bar
-        optimizer.zero_grad()
+            pbar = tqdm(pbar, total=nb)  # progress bar # tqdm进度条迭代
+        optimizer.zero_grad()  # 每轮前清空梯度
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
-            ni = i + nb * epoch  # number integrated batches (since train start)
+            ni = i + nb * epoch  # number integrated batches (since train start) 记录总iterations, 可以用于停止warmup
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
                 # model.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
-                accumulate = max(1, np.interp(ni, xi, [1, nbs / total_batch_size]).round())
-                for j, x in enumerate(optimizer.param_groups):
+                accumulate = max(1, np.interp(ni, xi, [1, nbs / total_batch_size]).round())  # 梯度积累 线性插值xi=[0, 1000], yi=[1, 64/batchsize], 插入点x=ni, 之后取整, 最小限1. warmup时accumulate会逐渐从1按整数增大到目标, warmup结束后稳定在目标值 round(nbs/accumulate), 例如batchsize32实际上两batch才更新一次,等效于64
+                for j, x in enumerate(optimizer.param_groups):  # warmup过程中逐渐把三组参数的lr调到lr0
                     # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
                     x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 2 else 0.0, x['initial_lr'] * lf(epoch)])
                     if 'momentum' in x:
                         x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
 
-            # Multi-scale
+            # Multi-scale 默认关multi scale
             if opt.multi_scale:
                 sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
                 sf = sz / max(imgs.shape[2:])  # scale factor
@@ -302,23 +302,23 @@ def train(hyp, opt, device, tb_writer=None):
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
-            with amp.autocast(enabled=cuda):
+            with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                if rank != -1:
+                if rank != -1:  # DDP中loss * GPU数
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
 
-            # Backward
+            # Backward  # 混合精度训练反传时用scalar自动scale梯度
             scaler.scale(loss).backward()
 
             # Optimize
-            if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
+            if ni % accumulate == 0:  # 梯度积累accumulate次后才优化,
+                scaler.step(optimizer)  # optimizer.step  # 混合精度训练优化时用scaler
                 scaler.update()
                 optimizer.zero_grad()
-                if ema:
+                if ema:  # 不开DDP和DDP主线程中ema开启, 每次更新ema
                     ema.update(model)
 
             # Print
@@ -345,13 +345,13 @@ def train(hyp, opt, device, tb_writer=None):
 
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
-        scheduler.step()
+        scheduler.step()  # 更新Scheduler
 
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
             # mAP
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
-            final_epoch = epoch + 1 == epochs
+            final_epoch = epoch + 1 == epochs  # 是否是最后一轮
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
                 results, maps, times = test.test(data_dict,
@@ -378,14 +378,14 @@ def train(hyp, opt, device, tb_writer=None):
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
                     'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
                     'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
+            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):  # 写tensorboard
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb_logger.wandb:
                     wandb_logger.log({tag: x})  # W&B
 
             # Update best mAP
-            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95] 按0.1*AP.5+0.9*AP.5:.95指标衡量模型
             if fi > best_fitness:
                 best_fitness = fi
             wandb_logger.end_epoch(best_result=best_fitness == fi)
@@ -415,7 +415,7 @@ def train(hyp, opt, device, tb_writer=None):
     # end training
     if rank in [-1, 0]:
         # Plots
-        if plots:
+        if plots:  # 不进化就画图
             plot_results(save_dir=save_dir)  # save as results.png
             if wandb_logger.wandb:
                 files = ['results.png', 'confusion_matrix.png', *[f'{x}_curve.png' for x in ('F1', 'PR', 'P', 'R')]]
@@ -521,7 +521,7 @@ if __name__ == '__main__':
         opt.name = 'evolve' if opt.evolve else opt.name  # project名字,用于保存文件夹
         opt.save_dir = increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok | opt.evolve)  # increment run
 
-    # DDP mode 数据并行
+    # DDP mode 数据多进程并行
     opt.total_batch_size = opt.batch_size  # 总batchsize
     device = select_device(opt.device, batch_size=opt.batch_size)  # 设备数
     if opt.local_rank != -1:  # 默认是-1不开启DDP
