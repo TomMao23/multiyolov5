@@ -145,7 +145,7 @@ class Model(nn.Module):  # 核心模型
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
         for m in self.model:
-            if m.f != -1:  # if not from previous layer
+            if m.f != -1:  # if not from previous layer 非单纯上一层则需要调整此层输入
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
                     # 输入来自单层, 直接取那层输出           来自多层, 其中-1取输入x, 非-1取那层输出
 
@@ -156,7 +156,7 @@ class Model(nn.Module):  # 核心模型
                     _ = m(x)
                 dt.append((time_synchronized() - t) * 100)
                 print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
-
+            # 调好输入每层都是直接跑, detect是最后一层, for循环最后一个自然是detect结果
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output 解析时self.save记录了需要保存的那些层(后续用到),仅保存这些层输出即可
 
