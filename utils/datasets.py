@@ -351,8 +351,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.augment = augment
         self.hyp = hyp
         self.image_weights = image_weights
-        self.rect = False if image_weights else rect
-        self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
+        self.rect = False if image_weights else rect # 开image_weights就不可rect inference
+        self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training) 开rect就不可mosaic
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.path = path
@@ -525,7 +525,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             img, labels = load_mosaic(self, index)
             shapes = None
 
-            # MixUp https://arxiv.org/pdf/1710.09412.pdf
+            # MixUp https://arxiv.org/pdf/1710.09412.pdf 有mosaic才mixup
             if random.random() < hyp['mixup']:
                 img2, labels2 = load_mosaic(self, random.randint(0, self.n - 1))
                 r = np.random.beta(8.0, 8.0)  # mixup ratio, alpha=beta=8.0
@@ -547,7 +547,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         if self.augment:
             # Augment imagespace
-            if not mosaic:
+            if not mosaic:  # 没mosaic才random percpective
                 img, labels = random_perspective(img, labels,
                                                  degrees=hyp['degrees'],
                                                  translate=hyp['translate'],
@@ -555,7 +555,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                                                  shear=hyp['shear'],
                                                  perspective=hyp['perspective'])
 
-            # Augment colorspace
+            # Augment colorspace #
             augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
 
             # Apply cutouts

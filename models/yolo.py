@@ -22,14 +22,16 @@ except ImportError:
 
 
 class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征图同Detect
-    def __init__(self):
+    def __init__(self, n_segcls=18, ch=()):
         super(SegMask, self).__init__()
+        self.n_out = n_segcls
+
 
     def forward(self, x):
         pass
 
 
-class InstMask(nn.Module):  # TODO: 实例分割头, 计划尝试论文BoxInst的方法, 不使用实例分割标签
+class InstMask(nn.Module):  # TODO: 实例分割头, 计划尝试论文BoxInst的方法, 仅用检测数据训练实例分割
     def __init__(self):
         super(InstMask, self).__init__()
 
