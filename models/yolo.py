@@ -5,6 +5,8 @@ import logging
 import sys
 from copy import deepcopy
 
+import onnx.external_data_helper
+
 sys.path.append('./')  # to run '$ python *.py' files in subdirectories
 logger = logging.getLogger(__name__)
 
@@ -22,16 +24,20 @@ except ImportError:
 
 
 class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征图同Detect (第一版:仅用PAN的1/8处, 但与detect分开处理, 即一个C3, 一个Conv调整成类别通道, 一个上采样)
-    def __init__(self, n_segcls=18, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_是C3的输出通道数
+    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_是C3的输出通道数
         super(SegMask, self).__init__()
         self.c_in = ch[0]  # 此版本Head暂时只有一层输入
         self.c_out = n_segcls
-        self.c3 = C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5)
-        self.conv = Conv(c1=c_hid, c2=self.c_out, k=3, )
-        self.up = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)
-
+        # self.c3 = C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5)
+        # self.conv = Conv(c1=c_hid, c2=self.c_out, k=3, )
+        # self.up = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)
+        self.m = nn.Sequential(C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
+                               nn.Dropout(0.1, False),
+                               nn.Conv2d(c_hid, self.c_out, kernel_size=(1,1), stride=(1, 1),
+                                         padding=(0, 0), groups=1, bias=False),  # kernel 1*1, 不激活不BN
+                               nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),)
     def forward(self, x):
-        return self.up(self.conv(self.c3(x[0])))
+        return self.m(x[0])  # self.up(self.conv(self.c3(x[0])))
 
 
 class InstMask(nn.Module):  # TODO: 实例分割头, 计划尝试论文BoxInst的方法, 仅用检测数据训练实例分割
@@ -261,9 +267,10 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             if isinstance(args[1], int):  # number of anchors 一般跑不进这句, args[1]是anchors在配置文件中已用列表写好, 非int
                 args[1] = [list(range(args[1] * 2))] * len(f)
         elif m is SegMask:  # 语义分割头
-            args[1] = n  # SegMask C3 的n
+            args[1] = max(round(args[1] * gd), 1) if args[1] > 1 else args[1]  # SegMask 中 C3 的n
             args[2] = make_divisible(args[2] * gw, 8)  # SegMask C3 的输出通道数
             args.append([ch[x] for x in f])
+            # n = 1 不用设1了, SegMask自己的n永远1
         elif m is Contract:
             c2 = ch[f] * args[0] ** 2
         elif m is Expand:
