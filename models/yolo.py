@@ -21,14 +21,17 @@ except ImportError:
     thop = None
 
 
-class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征图同Detect
-    def __init__(self, n_segcls=18, ch=()):
+class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征图同Detect (第一版:仅用PAN的1/8处, 但与detect分开处理, 即一个C3, 一个Conv调整成类别通道, 一个上采样)
+    def __init__(self, n_segcls=18, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_是C3的输出通道数
         super(SegMask, self).__init__()
-        self.n_out = n_segcls
-
+        self.c_in = ch[0]  # 此版本Head暂时只有一层输入
+        self.c_out = n_segcls
+        self.c3 = C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5)
+        self.conv = Conv(c1=c_hid, c2=self.c_out, k=3, )
+        self.up = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)
 
     def forward(self, x):
-        pass
+        return self.up(self.conv(self.c3(x[0])))
 
 
 class InstMask(nn.Module):  # TODO: 实例分割头, 计划尝试论文BoxInst的方法, 仅用检测数据训练实例分割
@@ -63,7 +66,7 @@ class Detect(nn.Module):  # 检测头
         for i in range(self.nl):  # 分别对三个输出层处理
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
-            # 输出变形BCHW(C=na*nc) -> B,na,H,W,no(由第二维区分三个anchor)
+            # 输出x[i]变形BCHW(C=na*no) --> B,na,H,W,no(由第二维区分三个anchor),  no=nc+5,  x是3个张量的列表, 一个张量表一个输出层
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
             if not self.training:  # inference
@@ -73,9 +76,9 @@ class Detect(nn.Module):  # 检测头
                 y = x[i].sigmoid()  # 所有通道输出sigmoid, 后1+类别数通道自然表示有无目标和目标种类, 前4个通道按公式偏移放缩anchor
                 y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy 中心偏移公式见issue
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh 大小放缩公式见issue
-                z.append(y.view(bs, -1, self.no))                           # 0输入时保证0偏移, 中心0输入0.5输出偏到grid中心(yolo anchor从左上角算起))
-        # 训练直接返回变形后的x去求损失, 推理对                                    # 大小0输入1输出乘以anchor尺寸不变, 公式限制最大放大倍数为4倍
-        return x if self.training else (torch.cat(z, 1), x)
+                z.append(y.view(bs, -1, self.no))                           # 0输入时保证0偏移, 中心0输入0.5输出,偏到grid中心(yolo anchor从左上角算起))
+        # 训练直接返回变形后的x去求损失, 推理对                                    # 大小0输入1输出,乘以anchor尺寸不变, 公式限制最大放大倍数为4倍
+        return x if self.training else (torch.cat(z, 1), x)  # 注意训练模式和测试(以及推理)模式不同, 训练模式仅返回变形后的x, 测试推理返回放缩偏移后的box(即z)和变形后x
 
     @staticmethod
     def _make_grid(nx=20, ny=20):  # 用来生成anchor中心(特征图每个像素下标即其anchor中心)的函数
@@ -103,6 +106,7 @@ class Model(nn.Module):  # 核心模型
             logger.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist 解析配置文件
+        self.save.append(24)  # 增加记录分割层
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
@@ -110,7 +114,7 @@ class Model(nn.Module):  # 核心模型
         m = self.model[-1]  # Detect()  Detect头
         if isinstance(m, Detect):
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))[0]])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
             self.stride = m.stride
@@ -143,7 +147,8 @@ class Model(nn.Module):  # 核心模型
             return self.forward_once(x, profile)  # single-scale inference, train
 
     def forward_once(self, x, profile=False):
-        y, dt = [], []  # outputs
+        y, dt = [], []  # outputs  用于记录中间输出的y, profile时间的dt
+        out = []  # 用于保存改版后的分割+检测输出
         for m in self.model:
             if m.f != -1:  # if not from previous layer 非单纯上一层则需要调整此层输入
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -158,11 +163,13 @@ class Model(nn.Module):  # 核心模型
                 print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
             # 调好输入每层都是直接跑, detect是最后一层, for循环最后一个自然是detect结果
             x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output 解析时self.save记录了需要保存的那些层(后续用到),仅保存这些层输出即可
+            # print(m.i, m.type, x.shape if m.f !=-1 else [a.shape for a in x])
+            y.append(x if m.i in self.save else None)  # save output 解析时self.save记录了需要保存的那些层(后续层输入用到),仅保存这些层输出即可(改版代码新增记录分割层24)
 
         if profile:
             print('%.1fms total' % sum(dt))
-        return x
+
+        return [x, y[-2]]  # 检测, 分割
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
@@ -221,7 +228,7 @@ class Model(nn.Module):  # 核心模型
 
 def parse_model(d, ch):  # model_dict, input_channels(3)
     logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
-    anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
+    anchors, nc, gd, gw, n_segcls = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple'], d['n_segcls']
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5) yolo输出通道数 = anchor数 * (类别+1个是否有目标+4个偏移放缩量)
 
@@ -237,14 +244,14 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
                  C3, C3TR]:
-            c1, c2 = ch[f], args[0]  # 指定层输入输出通道数(ch记录各层输出通道,f表输入层下标,输入层的输出通道就是本层输入通道)
-            if c2 != no:  # if not output 对非输出层
+            c1, c2 = ch[f], args[0]  # 指定层输入(c1)输出(c2)通道数(ch记录各层输出通道,f表输入层下标,输入层的输出通道就是本层输入通道)
+            if c2 != no:  # if not output 对非输出层, 原作者此处代码有风险
                 c2 = make_divisible(c2 * gw, 8)  # 实际输出通道数是 配置文件的c2 * width_multiple 并向上取到可被8整除
 
             args = [c1, c2, *args[1:]]
             if m in [BottleneckCSP, C3, C3TR]:
                 args.insert(2, n)  # number of repeats 对C3和BottleneckCSP来说深度n代表残差模块的个数, C3TR的n表transformer的head数
-                n = 1
+                n = 1  # 置1表示深度对这三个模块是控制子结构重复, 而不是本身重复
         elif m is nn.BatchNorm2d:
             args = [ch[f]]  # 对BN层, 参数就是输入层的通道数
         elif m is Concat:
@@ -253,6 +260,10 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])  # 检测层, 把来源下标列表f中的层输出通道数加入args中, 用于构建Detect的卷积输入通道数
             if isinstance(args[1], int):  # number of anchors 一般跑不进这句, args[1]是anchors在配置文件中已用列表写好, 非int
                 args[1] = [list(range(args[1] * 2))] * len(f)
+        elif m is SegMask:  # 语义分割头
+            args[1] = n  # SegMask C3 的n
+            args[2] = make_divisible(args[2] * gw, 8)  # SegMask C3 的输出通道数
+            args.append([ch[x] for x in f])
         elif m is Contract:
             c2 = ch[f] * args[0] ** 2
         elif m is Expand:
@@ -260,7 +271,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         else:
             c2 = ch[f]
 
-        m_ = nn.Sequential(*[m(*args) for _ in range(n)]) if n > 1 else m(*args)  # module 深度不仅是block子结构重复次数, block本身子结构(如C3的残差块)也对应重复
+        m_ = nn.Sequential(*[m(*args) for _ in range(n)]) if n > 1 else m(*args)  # module 深度控制C3等的block子结构重复次数(见上if中n置为1), 对Conv等则是其本身重复次数
         t = str(m)[8:-2].replace('__main__.', '')  # module type
         np = sum([x.numel() for x in m_.parameters()])  # number params
         m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params
@@ -275,7 +286,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml')
+    parser.add_argument('--cfg', type=str, default='yolov5s_city_seg.yaml', help='model.yaml')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     opt = parser.parse_args()
     opt.cfg = check_file(opt.cfg)  # check file

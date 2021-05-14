@@ -250,7 +250,7 @@ def train(hyp, opt, device, tb_writer=None):
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        print(accumulate)
+        print(f'accumulate: {accumulate}')  # 显示epoch开始时梯度积累(第一个值忽略, 注意warmup期间按batch变化, 此处只是辅助观察)
         model.train()  # epoch开始, 确保train模式
 
         # Update image weights (optional) 更新image_weights权重, 默认不开image_weights
@@ -303,7 +303,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
-                pred = model(imgs)  # forward
+                pred = model(imgs)[0]  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:  # DDP中loss * GPU数
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
