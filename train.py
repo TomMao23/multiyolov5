@@ -30,10 +30,11 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss
+from utils.loss import ComputeLoss, SegmentationLosses
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
+import SegMentationDataset
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,7 @@ def train(hyp, opt, device, tb_writer=None):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
         logger.info('Using SyncBatchNorm()')
 
-    # Trainloader
+    # 检测 Trainloader
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
@@ -219,6 +220,12 @@ def train(hyp, opt, device, tb_writer=None):
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)  # anchor_t是最大放大倍数,yolov5公式不同于v3v4, 见核心Model推理时anchor偏移放缩公式和issue
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
+    # 分割 loader
+    seg_trainloader, seg_valloader = SegMentationDataset.get_citys_loader(root='../cityscapesdet',
+                                                                          base_size=2048, crop_size=640,
+                                                                          batch_size=total_batch_size,
+                                                                          workers=4, pin=True)
+    segnb = len(seg_trainloader)
     # DDP mode
     if cuda and rank != -1:  # 没禁用(-1)就开DDP模型
         model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank,
@@ -243,17 +250,18 @@ def train(hyp, opt, device, tb_writer=None):
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
     scheduler.last_epoch = start_epoch - 1  # do not move 配置lr_scheduler起始位置
-    scaler = amp.GradScaler(enabled=cuda)  # 说明不是float16训练,而是16和32混合精度训练. 训练前初始化loss scaler 用于float16放大梯度后backward, optimizer.step之前转float32再缩回来
-    compute_loss = ComputeLoss(model)  # init loss class 初始化criteria
+    scaler = amp.GradScaler(enabled=cuda)  # 说明不是float16训练,而是16和32混合精度训练. 训练前初始化loss scaler 用于float16放大梯度后backward, optimizer.step之前自动转float32再缩回来
+    compute_loss = ComputeLoss(model)  # init loss class 初始化检测criteria
+    compute_seg_loss = SegmentationLosses(nclass=19, aux=False).cuda()  # 分割loss,(19仅代表cityscapes) 暂时纯CE loss, 忽略-1的标签, 不支持cpu和多卡gpu训练
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        print(f'accumulate: {accumulate}')  # 显示epoch开始时梯度积累(第一个值忽略, 注意warmup期间按batch变化, 此处只是辅助观察)
+        print(f'accumulate: {accumulate}')  # 显示epoch开始时梯度积累次数(第一个值忽略, 注意warmup期间按batch变化, 此处只是辅助观察)
         model.train()  # epoch开始, 确保train模式
 
-        # Update image weights (optional) 更新image_weights权重, 默认不开image_weights
+        # Update image weights (optional) 更新image_weights权重, 默认不开image_weights忽略此块代码
         if opt.image_weights:
             # Generate indices
             if rank in [-1, 0]:
@@ -271,18 +279,25 @@ def train(hyp, opt, device, tb_writer=None):
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(4, device=device)  # mean losses
+        mloss = torch.zeros(4, device=device)  # 检测 mean losses
+        msegloss = torch.zeros(1, device=device)  # 混合的 mean losses, 两者计算也可知分割loss
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)  # shuffle时, 保证每个epoch顺序不同
         pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+        segpbar = enumerate(seg_trainloader)
+        logger.info(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'seg', 'labels', 'img_size'))
         if rank in [-1, 0]:
-            pbar = tqdm(pbar, total=nb)  # progress bar # tqdm进度条迭代
+            pbar = tqdm(pbar, total=min(nb, segnb))  # progress bar # tqdm进度条迭代
+            segpbar = tqdm(segpbar, total=min(nb, segnb))
         optimizer.zero_grad()  # 每轮前清空梯度
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
-            ni = i + nb * epoch  # number integrated batches (since train start) 记录总iterations, 可以用于停止warmup
-            imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
+        # 暂时用zip, 每轮batch数以数量少的为准
+        for det_batch, seg_batch in zip(pbar, segpbar):  # batch -------------------------------------------------------------
+            i, (imgs, targets, paths, _) = det_batch  # 检测
+            _, (segimgs, segtargets) = seg_batch   # 分割
+            # warmup等参数变化以检测为准
+            ni = i + nb * epoch  # number integrated batches (since train start) 记录总iterations, 可以用于停止warmup
+            imgs = imgs.to(device, non_blocking=False).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -301,17 +316,32 @@ def train(hyp, opt, device, tb_writer=None):
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
-            # Forward
+            # Forward and Backward 对比原版yolov5此处修改显存管理略有小技巧, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
+            detgain, seggain = 0.6, 0.4
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
-                pred = model(imgs)[0]  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                pred = model(imgs)  # forward
+                loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size
                 if rank != -1:  # DDP中loss * GPU数
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
-
-            # Backward  # 混合精度训练反传时用scalar自动scale梯度
+                loss *= detgain  # 检测loss比例
             scaler.scale(loss).backward()
+
+            imgs = imgs.to(torch.device('cpu'), non_blocking=False)  # 释放
+            segimgs = segimgs.to(device, non_blocking=False)  # 分割已经做过totensor了, 不用/255
+
+            with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
+                pred = model(segimgs)
+                segloss = compute_seg_loss(pred[1], segtargets.to(device)) * total_batch_size # 分割loss CE是平均loss, 配合检测做梯度积累, 因此乘以batchsize(注意有梯度积累其真实batchsize约是nbs=64)
+                segloss *= seggain
+            scaler.scale(segloss).backward()
+            segimgs = segimgs.to(torch.device('cpu'), non_blocking=False) #释放
+
+            # # Backward  # 混合精度训练反传时用scalar自动scale梯度
+            # seggain = 1
+            # mixloss = (loss + seggain*segloss) / 2.0
+            # scaler.scale(mixloss).backward()
 
             # Optimize
             if ni % accumulate == 0:  # 梯度积累accumulate次后才优化,
@@ -324,9 +354,10 @@ def train(hyp, opt, device, tb_writer=None):
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                msegloss = (msegloss * i + segloss.detach()/total_batch_size) / (i + 1)
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                s = ('%10s' * 2 + '%10.4g' * 7) % (
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, msegloss, targets.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
                 # Plot

@@ -13,6 +13,40 @@ from utils.general import check_img_size, check_requirements, check_imshow, non_
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
 from utils.plots import plot_one_box
 from utils.torch_utils import select_device, load_classifier, time_synchronized
+import numpy as np
+
+Cityscapes_COLOMAP = [
+    [128, 64, 128],
+    [244, 35, 232],
+    [70, 70, 70],
+    [102, 102, 156],
+    [190, 153, 153],
+    [153, 153, 153],
+    [250, 170, 30],
+    [220, 220, 0],
+    [107, 142, 35],
+    [152, 251, 152],
+    [0, 130, 180],
+    [220, 20, 60],
+    [255, 0, 0],
+    [0, 0, 142],
+    [0, 0, 70],
+    [0, 60, 100],
+    [0, 80, 100],
+    [0, 0, 230],
+    [119, 11, 32],
+]
+
+Cityscapes_Class = ["road", "sidewalk", "building", "wall", "fence",
+               "pole", "traffic light", "traffic sign", "vegetation",
+               "terrain", "sky", "person", "rider", "car", "truck",
+               "bus", "train", "motorcycle", "bicyle"]
+
+
+def label2image(pred, COLORMAP=Cityscapes_COLOMAP):
+    colormap = np.array(COLORMAP, dtype='uint8')
+    X = pred.astype('int32')
+    return colormap[X, :]
 
 
 def detect(save_img=False):
@@ -71,12 +105,14 @@ def detect(save_img=False):
 
         # Inference
         t1 = time_synchronized()
-        pred = model(img, augment=opt.augment)[0]
-
+        out = model(img, augment=opt.augment)
+        pred = out[0][0]
+        seg = out[1][0]
         # Apply NMS
         pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
         t2 = time_synchronized()
 
+        mask = label2image(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_COLOMAP)
         # Apply Classifier
         if classify:
             pred = apply_classifier(pred, modelc, img, im0s)
@@ -116,16 +152,23 @@ def detect(save_img=False):
 
             # Print time (inference + NMS)
             print(f'{s}Done. ({t2 - t1:.3f}s)')
+            mask = cv2.resize(mask[:, :, ::-1], (im0.shape[1], im0.shape[0]))
+            dst = cv2.addWeighted(mask, 0.35, im0, 0.65, 0)
 
             # Stream results
             if view_img:
                 cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
+                cv2.imshow("segmentation", mask)
+                cv2.imshow("mix", dst)
+                cv2.waitKey(0)  # 1 millisecond
 
             # Save results (image with detections)
             if save_img:
                 if dataset.mode == 'image':
                     cv2.imwrite(save_path, im0)
+                    cv2.imwrite(save_path[:-4]+"_mask"+save_path[-4:], mask)
+                    cv2.imwrite(save_path[:-4]+"_dst"+save_path[-4:], dst)
+
                 else:  # 'video' or 'stream'
                     if vid_path != save_path:  # new video
                         vid_path = save_path

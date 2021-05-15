@@ -242,7 +242,8 @@ def get_citys_loader(root=os.path.expanduser('../data/citys/'),  # 获取训练�
                      batch_size=32, workers=4, pin=True):
     input_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
+        # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
+        ])
     trainset = CitySegmentation(root=root, split='train', mode='train',
                                 transform=input_transform,
                                 base_size=base_size, crop_size=crop_size)
@@ -260,7 +261,7 @@ def get_citys_loader(root=os.path.expanduser('../data/citys/'),  # 获取训练�
 
 
 if __name__ == "__main__":
-    trainloader, valloader = get_citys_loader(root='../cityscapesdet', workers=4, pin=False)
+    trainloader, valloader = get_citys_loader(root='../cityscapesdet', workers=4, pin=False, batch_size=16)
     from utils.loss import SegmentationLosses
     criteria = SegmentationLosses(se_loss=False,
                                   aux=False,

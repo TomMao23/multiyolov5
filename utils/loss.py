@@ -159,7 +159,7 @@ class ComputeLoss:
         bs = tobj.shape[0]  # batch size
 
         loss = lbox + lobj + lcls
-        return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()  # BCE自动平均故乘batchsize
+        return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()  # BCE自动平均故乘batchsize, detach()从计算图中除去防止梯度泄露
 
     def build_targets(self, p, targets):
         # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
