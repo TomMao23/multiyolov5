@@ -34,7 +34,7 @@ from utils.loss import ComputeLoss, SegmentationLosses
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
-import SegMentationDataset
+import SegmentationDataset
 
 logger = logging.getLogger(__name__)
 
@@ -221,10 +221,16 @@ def train(hyp, opt, device, tb_writer=None):
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
     # 分割 loader
-    seg_trainloader, seg_valloader = SegMentationDataset.get_citys_loader(root='../cityscapesdet',
-                                                                          base_size=2048, crop_size=640,
-                                                                          batch_size=total_batch_size,
-                                                                          workers=4, pin=True)
+    seg_trainloader = SegmentationDataset.get_citys_loader(root='data/citys',
+                                                           split="train", mode="train",
+                                                           base_size=2048, crop_size=640,
+                                                           batch_size=total_batch_size,
+                                                           workers=4, pin=True)
+    seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=4,
+                                                         split="val", mode="val",
+                                                         base_size=2048, crop_size=640,
+                                                         workers=4)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
+                                                                     # 我电脑上4, 4是最快的, 更大子进程会挂
     segnb = len(seg_trainloader)
     # DDP mode
     if cuda and rank != -1:  # 没禁用(-1)就开DDP模型
@@ -316,7 +322,7 @@ def train(hyp, opt, device, tb_writer=None):
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
-            # Forward and Backward 对比原版yolov5此处修改显存管理略有小技巧, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
+            # Forward and Backward 对比原版yolov5此处修改, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
             detgain, seggain = 0.6, 0.4
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
@@ -378,6 +384,9 @@ def train(hyp, opt, device, tb_writer=None):
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
         scheduler.step()  # 更新Scheduler
 
+        # pixACC, mIoU
+        test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
+                            half_precision=False)
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
             # mAP

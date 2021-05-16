@@ -15,6 +15,7 @@ import torch
 import torch.utils.data as data
 from torchvision import transforms
 
+
 # 基础语义分割类, 各数据集可以继承此类实现
 class BaseDataset(data.Dataset):
     def __init__(self, root, split, mode=None, transform=None,
@@ -44,7 +45,7 @@ class BaseDataset(data.Dataset):
     def make_pred(self, x):
         return x + self.pred_offset
 
-    def _val_sync_transform(self, img, mask):
+    def _val_sync_transform(self, img, mask):  # 训练中验证数据处理: 把图短边resize成crop_size, 长边保持比例, 再crop一块用于验证
         outsize = self.crop_size
         short_size = outsize
         w, h = img.size
@@ -65,13 +66,13 @@ class BaseDataset(data.Dataset):
         # final transform
         return img, self._mask_transform(mask)
 
-    def _sync_transform(self, img, mask):
+    def _sync_transform(self, img, mask):  # 训练数据增广
         # random mirror
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
             mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
         crop_size = self.crop_size
-        # random scale (short edge)
+        # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
         long_size = random.randint(int(self.base_size*0.5), int(self.base_size*2.0))
         if h > w:
@@ -84,13 +85,13 @@ class BaseDataset(data.Dataset):
             short_size = oh
         img = img.resize((ow, oh), Image.BILINEAR)
         mask = mask.resize((ow, oh), Image.NEAREST)
-        # pad crop
+        # pad crop  边长比crop_size小就pad
         if short_size < crop_size:
             padh = crop_size - oh if oh < crop_size else 0
             padw = crop_size - ow if ow < crop_size else 0
             img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
-            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=0)
-        # random crop crop_size
+            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=0)  # 为什么mask可以填0:类别0不是训练类别,后续会被填-1(bdd100k也适用)
+        # random crop 随机按crop_size从resize和pad的图上crop一块用于训练
         w, h = img.size
         x1 = random.randint(0, w - crop_size)
         y1 = random.randint(0, h - crop_size)
@@ -115,6 +116,7 @@ class BaseDataset(data.Dataset):
 class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
     NUM_CLASS = 19
 
+    # mode训练时候验证用val, 测试验证集指标时候用testval一般会更高且更接近真实水平
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
                  mode=None, transform=None, target_transform=None, **kwargs):
         super(CitySegmentation, self).__init__(
@@ -170,12 +172,12 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
         mask = Image.open(self.mask_paths[index])
         # synchrosized transform
         if self.mode == 'train':
-            img, mask = self._sync_transform(img, mask)
+            img, mask = self._sync_transform(img, mask)  # 训练数据增广
         elif self.mode == 'val':
-            img, mask = self._val_sync_transform(img, mask)
+            img, mask = self._val_sync_transform(img, mask)  # 验证数据处理
         else:
-            assert self.mode == 'testval'
-            mask = self._mask_transform(mask)
+            assert self.mode == 'testval'   # 训练时候验证用val(快, 省显存),测试验证集指标时用testval一般mIoU会更高且更接近真实水平
+            mask = self._mask_transform(mask)  # 测试验证指标, 除转换标签格式外不做任何处理
         # general resize, normalize and toTensor
         if self.transform is not None:
             img = self.transform(img)
@@ -237,31 +239,26 @@ def get_city_pairs(folder, split='train'):
     return img_paths, mask_paths
 
 
-def get_citys_loader(root=os.path.expanduser('../data/citys/'),  # 获取训练和验证用的dataloader
+# 训练以及训练中验证用这个
+def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
                      base_size=2048, crop_size=768,
                      batch_size=32, workers=4, pin=True):
     input_transform = transforms.Compose([
         transforms.ToTensor(),
         # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
-    trainset = CitySegmentation(root=root, split='train', mode='train',
-                                transform=input_transform,
-                                base_size=base_size, crop_size=crop_size)
-    valset = CitySegmentation(root=root, split='val', mode='val',
-                              transform=input_transform,
-                              base_size=base_size, crop_size=crop_size)
+    dataset = CitySegmentation(root=root, split=split, mode=mode,
+                               transform=input_transform,
+                               base_size=base_size, crop_size=crop_size)
 
-    trainloader = data.DataLoader(trainset, batch_size=batch_size,
-                                  drop_last=True, shuffle=True, num_workers=workers, pin_memory=pin)
-
-    valloader = data.DataLoader(valset, batch_size=batch_size,
-                                drop_last=False, shuffle=False, num_workers=workers, pin_memory=pin)
-    # nclass = trainset.num_class
-    return trainloader, valloader
+    loader = data.DataLoader(dataset, batch_size=batch_size,
+                             drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,
+                             num_workers=workers, pin_memory=pin)
+    return loader
 
 
 if __name__ == "__main__":
-    trainloader, valloader = get_citys_loader(root='../cityscapesdet', workers=4, pin=False, batch_size=16)
+    trainloader, valloader = get_citys_loader(root='./data/citys/detdata', workers=4, pin=False, batch_size=16)
     from utils.loss import SegmentationLosses
     criteria = SegmentationLosses(se_loss=False,
                                   aux=False,

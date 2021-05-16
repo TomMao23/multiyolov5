@@ -104,7 +104,7 @@ class Bottleneck(nn.Module):
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
 
-class BottleneckCSP(nn.Module):  # 早期版本head用这个,5.0模型没用这个, 和C3区别在于 C3 cat后一个卷积,这个cat后BN激活再卷积
+class BottleneckCSP(nn.Module):  # 5.0模型没用这个, 和C3区别在于 C3 cat后一个卷积,这个cat后BN激活再卷积
     # CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super(BottleneckCSP, self).__init__()

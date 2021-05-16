@@ -13,9 +13,54 @@ from models.experimental import attempt_load
 from utils.datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
-from utils.metrics import ap_per_class, ConfusionMatrix
+from utils.metrics import ap_per_class, ConfusionMatrix, batch_pix_accuracy, batch_intersection_union  # 后两个新增分割
 from utils.plots import plot_images, output_to_target, plot_study_txt
 from utils.torch_utils import select_device, time_synchronized
+
+import SegmentationDataset
+
+
+def seg_validation(model, n_segcls, valloader, device, half_precision=True):
+    # Fast test during the training
+    def eval_batch(model, image, target, half):
+        outputs = model(image)
+        # outputs = gather(outputs, 0, dim=0)
+        pred = outputs[1]  # 1是分割
+        target = target.cuda()
+        correct, labeled = batch_pix_accuracy(pred.data, target)
+        inter, union = batch_intersection_union(pred.data, target, n_segcls)
+        return correct, labeled, inter, union
+
+    half = device.type != 'cpu' and half_precision  # half precision only supported on CUDA
+    if half:
+        model.half()
+    model.eval()
+    total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
+    tbar = tqdm(valloader, desc='\r')
+    for i, (image, target) in enumerate(tbar):
+        image = image.to(device, non_blocking=True)
+        image = image.half() if half else image.float()
+        with torch.no_grad():
+            correct, labeled, inter, union = eval_batch(model, image, target, half)
+
+        total_correct += correct
+        total_label += labeled
+        total_inter += inter
+        total_union += union
+        pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
+        IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
+        mIoU = IoU.mean()
+        tbar.set_description(
+            'pixAcc: %.3f, mIoU: %.3f' % (pixAcc, mIoU))
+
+
+def segtest(weights, root="data/citys", batch_size=16, half_precision=True, n_segcls=19):  # 会使用原始尺寸测, 未考虑尺寸对不齐, 图片尺寸应为32倍数
+    device = select_device(opt.device, batch_size=batch_size)
+    model = attempt_load(weights, map_location=device)  # load FP32 model
+    #testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="testval", workers=2)
+    testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="val", workers=2)
+    seg_validation(model, n_segcls, testvalloader, device, half_precision)
+
 
 
 def test(data,
@@ -99,7 +144,7 @@ def test(data,
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
-        img = img.to(device, non_blocking=False)
+        img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
@@ -288,6 +333,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
     parser.add_argument('--weights', nargs='+', type=str, default='yolov5s.pt', help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/coco128.yaml', help='*.data path')
+    parser.add_argument('--segdata', type=str, default='data/citys', help='root path of segmentation data')
     parser.add_argument('--batch-size', type=int, default=32, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
@@ -344,3 +390,5 @@ if __name__ == '__main__':
             np.savetxt(f, y, fmt='%10.4g')  # save
         os.system('zip -r study.zip study_*.txt')
         plot_study_txt(x=x)  # plot
+
+    segtest(root=opt.segdata, weights=opt.weights, batch_size=int(opt.batch_size/2), n_segcls=19)  # 19 for cityscapes
