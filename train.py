@@ -223,12 +223,12 @@ def train(hyp, opt, device, tb_writer=None):
     # 分割 loader
     seg_trainloader = SegmentationDataset.get_citys_loader(root='data/citys',
                                                            split="train", mode="train",
-                                                           base_size=2048, crop_size=640,
+                                                           base_size=1536, crop_size=640,
                                                            batch_size=total_batch_size,
                                                            workers=4, pin=True)
     seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=4,
                                                          split="val", mode="val",
-                                                         base_size=2048, crop_size=640,
+                                                         base_size=1536, crop_size=640,
                                                          workers=4)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
                                                                      # 我电脑上4, 4是最快的, 更大子进程会挂
     segnb = len(seg_trainloader)
@@ -324,7 +324,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward and Backward 对比原版yolov5此处修改, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
 
-            detgain, seggain = 0.6, 0.4  # 检测, 分割比例
+            detgain, seggain = 0.35, 0.7  # 检测, 分割比例
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size

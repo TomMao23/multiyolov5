@@ -36,6 +36,7 @@ class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征�
                                nn.Conv2d(c_hid, self.c_out, kernel_size=(1,1), stride=(1, 1),
                                          padding=(0, 0), groups=1, bias=False),  # kernel 1*1, 不激活不BN
                                nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),)
+
     def forward(self, x):
         return self.m(x[0])  # self.up(self.conv(self.c3(x[0])))
 

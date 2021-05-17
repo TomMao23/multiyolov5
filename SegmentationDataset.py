@@ -74,7 +74,7 @@ class BaseDataset(data.Dataset):
         crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = random.randint(int(self.base_size*0.5), int(self.base_size*2.0))
+        long_size = random.randint(int(self.base_size*0.66), int(self.base_size*1.66))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -239,13 +239,20 @@ def get_city_pairs(folder, split='train'):
     return img_paths, mask_paths
 
 
-# 训练以及训练中验证用这个
 def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
                      base_size=2048, crop_size=768,
                      batch_size=32, workers=4, pin=True):
-    input_transform = transforms.Compose([
-        transforms.ToTensor(),
-        # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
+    if mode == "train":
+        input_transform = transforms.Compose([
+            transforms.ColorJitter(brightness=0.5, contrast=0.3,
+                                   saturation=0.3, hue=0.1),
+                          transforms.ToTensor(),
+            # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
+        ])
+    else:
+        input_transform = transforms.Compose([
+            transforms.ToTensor(),
+            # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
     dataset = CitySegmentation(root=root, split=split, mode=mode,
                                transform=input_transform,
