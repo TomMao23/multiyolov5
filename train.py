@@ -324,7 +324,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward and Backward 对比原版yolov5此处修改, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
 
-            detgain, seggain = 0.35, 0.7  # 检测, 分割比例
+            detgain, seggain = 0.35, 0.65  # 检测, 分割比例
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size
