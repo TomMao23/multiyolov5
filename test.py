@@ -57,8 +57,8 @@ def seg_validation(model, n_segcls, valloader, device, half_precision=True):
 def segtest(weights, root="data/citys", batch_size=16, half_precision=True, n_segcls=19):  # 会使用原始尺寸测, 未考虑尺寸对不齐, 图片尺寸应为32倍数
     device = select_device(opt.device, batch_size=batch_size)
     model = attempt_load(weights, map_location=device)  # load FP32 model
-    #testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="testval", workers=2)
-    testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="val", workers=2)
+    testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="testval", workers=2)
+    # testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="val", workers=2)
     seg_validation(model, n_segcls, testvalloader, device, half_precision)
 
 

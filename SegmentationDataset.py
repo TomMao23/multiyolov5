@@ -2,7 +2,7 @@
 # Created by: Hang Zhang
 # Email: zhang.hang@rutgers.edu
 # Copyright (c) 2017
-# 带标准数据加载增广的语义分割Dataset, Dataset类代码原作者张航, 详见其开发的库 Gluoncv 和 PyTorch-Encoding
+# 带标准数据加载增广的语义分割Dataset, Dataset类代码原作者张航, 详见其开发的库 PyTorch-Encoding
 # 稍加修改即可加载BDD100k分割数据
 ###########################################################################
 
