@@ -27,18 +27,7 @@ def convert_annotation(image_id, paths):
     output_cache = []
     for obj in load_dict['objects']:  # load_dict['objects'] -> 目标的几何框体
         obj_label = obj['label']  # 目标的类型
-        if obj_label not in [          
-                                'person',
-                                'rider',
-                                'car',
-                                'truck',
-                                'bus',
-                                'train',
-                                'motorcycle',
-                                'bicycle',
-                                'traffic light',
-                                'traffic sign'                                
-                                ]:  
+        if obj_label not in list(label_map.keys()):
             continue
 
         if obj_label not in label_map.keys():  # 记录目标类型转为int值
@@ -66,7 +55,17 @@ if __name__ == '__main__':
     image_output_root_dir = root_dir /'images'
     label_output_root_dir = root_dir / 'labels'
 
-    label_map = {}  # 存放所有的类别标签  eg. {'car': 0, 'person': 1}
+    label_map = { "car": 0,
+                  "traffic sign": 1,
+                  "rider": 2,
+                  "person": 3,
+                  "bicycle": 4,
+                  "traffic light": 5,
+                  "bus": 6,
+                  "motorcycle": 7,
+                  "truck": 8,
+                  "train": 9,
+   }  # 存放所有的类别标签  eg. {'car': 0, 'person': 1}
     for _t_ in tqdm(os.listdir(image_dir)):  # _t_ as ['train', 'test' 'val;]
         type_files = []  # 存放一类的所有文件，如训练集所有文件
         mkdir(image_output_root_dir / _t_), mkdir(label_output_root_dir / _t_)
