@@ -74,7 +74,7 @@ class BaseDataset(data.Dataset):
         crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = random.randint(int(self.base_size*0.66), int(self.base_size*1.66))
+        long_size = random.randint(int(self.base_size*0.66), int(self.base_size*1.5))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -246,7 +246,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
         input_transform = transforms.Compose([
             transforms.ColorJitter(brightness=0.3, contrast=0.3,
                                    saturation=0.3, hue=0.1),
-                          transforms.ToTensor(),
+            transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
     else:
