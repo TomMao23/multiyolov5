@@ -324,7 +324,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward and Backward 对比原版yolov5此处修改, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
 
-            detgain, seggain = 0.35, 0.65  # 检测, 分割比例
+            detgain, seggain = 0.7, 1.2  # 检测, 分割比例
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size
@@ -354,7 +354,7 @@ def train(hyp, opt, device, tb_writer=None):
             if ni % accumulate == 0:  # 梯度积累accumulate次后才优化,
                 scaler.step(optimizer)  # optimizer.step  # 混合精度训练优化时用scaler
                 scaler.update()
-                optimizer.zero_grad()
+                optimizer.zero_grad()  # 每次更新完参数才清空梯度, 不更新时累计
                 if ema:  # 不开DDP和DDP主线程中ema开启, 每次更新ema
                     ema.update(model)
 
@@ -385,11 +385,12 @@ def train(hyp, opt, device, tb_writer=None):
         lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
         scheduler.step()  # 更新Scheduler
 
-        # pixACC, mIoU
-        test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
-                            half_precision=False)
+
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
+            # pixACC, mIoU
+            test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
+                                half_precision=False)
             # mAP
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
             final_epoch = epoch + 1 == epochs  # 是否是最后一轮

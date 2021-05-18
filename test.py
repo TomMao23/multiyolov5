@@ -58,7 +58,7 @@ def segtest(weights, root="data/citys", batch_size=16, half_precision=True, n_se
     device = select_device(opt.device, batch_size=batch_size)
     model = attempt_load(weights, map_location=device)  # load FP32 model
     testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="testval", workers=4)
-    # testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="val", workers=4, base_size=1536, crop_size=640)
+    # testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="val", workers=4, base_size=1024, crop_size=1024)
     seg_validation(model, n_segcls, testvalloader, device, half_precision)
 
 
