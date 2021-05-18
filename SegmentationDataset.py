@@ -45,6 +45,18 @@ class BaseDataset(data.Dataset):
     def make_pred(self, x):
         return x + self.pred_offset
 
+    def _testval_img_transform(self, img):  # 新的训练后测验证集数据处理: 图长边resize到base_size, 但标签是原图, 若非原图需要测试时手动把输出放大到原图 (原版仅处理标签, 原图输入)
+        w, h = img.size
+        outlong = self.base_size
+        if w > h:
+            ow = outlong
+            oh = int(1.0 * h * ow / w)
+        else:
+            oh = outlong
+            ow = int(1.0 * w * oh / h)
+        img = img.resize((ow, oh), Image.BILINEAR)
+        return img
+
     def _val_sync_transform(self, img, mask):  # 训练中验证数据处理: 把图短边resize成crop_size, 长边保持比例, 再crop一块用于验证
         outsize = self.crop_size
         short_size = outsize
@@ -177,7 +189,10 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
             img, mask = self._val_sync_transform(img, mask)  # 验证数据处理
         else:
             assert self.mode == 'testval'   # 训练时候验证用val(快, 省显存),测试验证集指标时用testval一般mIoU会更高且更接近真实水平
-            mask = self._mask_transform(mask)  # 测试验证指标, 除转换标签格式外不做任何处理
+            # mask = self._mask_transform(mask)  # 测试验证指标, 除转换标签格式外不做任何处理
+            img = self._testval_img_transform(img)
+            mask = self._mask_transform(mask)
+
         # general resize, normalize and toTensor
         if self.transform is not None:
             img = self.transform(img)
