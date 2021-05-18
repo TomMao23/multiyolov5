@@ -16,8 +16,16 @@ from utils.general import coco80_to_coco91_class, check_dataset, check_file, che
 from utils.metrics import ap_per_class, ConfusionMatrix, batch_pix_accuracy, batch_intersection_union  # 后两个新增分割
 from utils.plots import plot_images, output_to_target, plot_study_txt
 from utils.torch_utils import select_device, time_synchronized
+import torch.nn.functional as F
 
 import SegmentationDataset
+
+"""
+新版训练测试(loader的mode为"testval")可以把验证集长边resize到base-size输入到网络, 但mask仍然是原图尺寸, 以下代码自动把网络输出双线性插值到原图算指标
+调用示例:
+python test.py --data cityscapes_det.yaml --segdata ./data/citys --weights ./best.pt --img-size 640 --base-size 640
+即相比原版yolov5多 --segdata 和 --base-size两个参数
+"""
 
 
 def seg_validation(model, n_segcls, valloader, device, half_precision=True):
@@ -27,6 +35,7 @@ def seg_validation(model, n_segcls, valloader, device, half_precision=True):
         # outputs = gather(outputs, 0, dim=0)
         pred = outputs[1]  # 1是分割
         target = target.cuda()
+        pred = F.interpolate(pred, (target.shape[1], target.shape[2]), mode='bilinear', align_corners=True)
         correct, labeled = batch_pix_accuracy(pred.data, target)
         inter, union = batch_intersection_union(pred.data, target, n_segcls)
         return correct, labeled, inter, union
@@ -54,10 +63,10 @@ def seg_validation(model, n_segcls, valloader, device, half_precision=True):
             'pixAcc: %.3f, mIoU: %.3f' % (pixAcc, mIoU))
 
 
-def segtest(weights, root="data/citys", batch_size=16, half_precision=True, n_segcls=19):  # 会使用原始尺寸测, 未考虑尺寸对不齐, 图片尺寸应为32倍数
+def segtest(weights, root="data/citys", batch_size=16, half_precision=True, n_segcls=19, base_size=2048):  # 会使用原始尺寸测, 未考虑尺寸对不齐, 图片尺寸应为32倍数
     device = select_device(opt.device, batch_size=batch_size)
     model = attempt_load(weights, map_location=device)  # load FP32 model
-    testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="testval", workers=4)
+    testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="testval", workers=4, base_size=base_size)
     # testvalloader = SegmentationDataset.get_citys_loader(root, batch_size=batch_size, split="val", mode="val", workers=4, base_size=1024, crop_size=1024)
     seg_validation(model, n_segcls, testvalloader, device, half_precision)
 
@@ -336,6 +345,7 @@ if __name__ == '__main__':
     parser.add_argument('--segdata', type=str, default='data/citys', help='root path of segmentation data')
     parser.add_argument('--batch-size', type=int, default=32, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
+    parser.add_argument('--base-size', type=int, default=2048, help='long side of segtest image you want to input network')
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
@@ -391,4 +401,4 @@ if __name__ == '__main__':
         os.system('zip -r study.zip study_*.txt')
         plot_study_txt(x=x)  # plot
 
-    segtest(root=opt.segdata, weights=opt.weights, batch_size=int(opt.batch_size/8), n_segcls=19)  # 19 for cityscapes
+    segtest(root=opt.segdata, weights=opt.weights, batch_size=int(opt.batch_size/8), n_segcls=19, base_size=opt.base_size)  # 19 for cityscapes

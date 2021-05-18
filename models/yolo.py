@@ -33,7 +33,7 @@ class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征�
         # self.up = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)
         self.m = nn.Sequential(C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
                                nn.Dropout(0.1, False),
-                               nn.Conv2d(c_hid, self.c_out, kernel_size=(1,1), stride=(1, 1),
+                               nn.Conv2d(c_hid, self.c_out, kernel_size=(1, 1), stride=(1, 1),
                                          padding=(0, 0), groups=1, bias=False),  # kernel 1*1, 不激活不BN
                                nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),)
 
