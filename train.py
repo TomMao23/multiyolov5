@@ -303,12 +303,12 @@ def train(hyp, opt, device, tb_writer=None):
             _, (segimgs, segtargets) = seg_batch   # 分割
             # warmup等参数变化以检测为准
             ni = i + nb * epoch  # number integrated batches (since train start) 记录总iterations, 可以用于停止warmup
-            imgs = imgs.to(device, non_blocking=False).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
-                # model.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
-                accumulate = max(1, np.interp(ni, xi, [1, nbs / total_batch_size]).round())  # 梯度积累 线性插值xi=[0, 1000], yi=[1, 64/batchsize], 插入点x=ni, 之后取整, 最小限1. warmup时accumulate会逐渐从1按整数增大到目标, warmup结束后稳定在目标值 round(nbs/accumulate), 例如batchsize32实际上两batch才更新一次,等效于64
+                # model.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)  # 修改了accumulate上限,使其不超过nbs(防止Nan)
+                accumulate = max(1, np.interp(ni, xi, [1, math.floor(nbs / total_batch_size)]).round())  # 梯度积累 线性插值xi=[0, 1000], yi=[1, 64/batchsize], 插入点x=ni, 之后取整, 最小限1. warmup时accumulate会逐渐从1按整数增大到目标, warmup结束后稳定在目标值 round(nbs/accumulate), 例如batchsize32实际上两batch才更新一次,等效于64
                 for j, x in enumerate(optimizer.param_groups):  # warmup过程中逐渐把三组参数的lr调到lr0
                     # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
                     x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 2 else 0.0, x['initial_lr'] * lf(epoch)])
@@ -324,7 +324,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward and Backward 对比原版yolov5此处修改, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
 
-            detgain, seggain = 0.5, 0.9  # 检测, 分割比例
+            detgain, seggain = 0.4, 0.8  # 检测, 分割比例
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size
@@ -335,15 +335,15 @@ def train(hyp, opt, device, tb_writer=None):
                 loss *= detgain  # 检测loss比例
             scaler.scale(loss).backward()
 
-            imgs = imgs.to(torch.device('cpu'), non_blocking=False)  # 释放
-            segimgs = segimgs.to(device, non_blocking=False)  # 分割已经做过totensor了, 不用/255
+            imgs = imgs.to(torch.device('cpu'), non_blocking=True)  # 释放
+            segimgs = segimgs.to(device, non_blocking=True)  # 分割已经做过totensor了, 不用/255
 
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(segimgs)
                 segloss = compute_seg_loss(pred[1], segtargets.to(device)) * total_batch_size # 分割loss CE是平均loss, 配合检测做梯度积累, 因此乘以batchsize(注意有梯度积累其真实batchsize约是nbs=64)
                 segloss *= seggain
             scaler.scale(segloss).backward()
-            segimgs = segimgs.to(torch.device('cpu'), non_blocking=False) #释放
+            # segimgs = segimgs.to(torch.device('cpu'), non_blocking=False) #释放
 
             # # Backward  # 混合精度训练反传时用scalar自动scale梯度
             # seggain = 1
