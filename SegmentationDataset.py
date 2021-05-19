@@ -14,6 +14,7 @@ from PIL import Image, ImageOps, ImageFilter
 import torch
 import torch.utils.data as data
 from torchvision import transforms
+from utils.general import make_divisible
 
 
 # 基础语义分割类, 各数据集可以继承此类实现
@@ -48,12 +49,15 @@ class BaseDataset(data.Dataset):
     def _testval_img_transform(self, img):  # 新的训练后测验证集数据处理: 图长边resize到base_size, 但标签是原图, 若非原图需要测试时手动把输出放大到原图 (原版仅处理标签, 原图输入)
         w, h = img.size
         outlong = self.base_size
+        outlong = make_divisible(outlong, 32)  # 32是网络最大下采样倍数, 测试时自动使边为32倍数
         if w > h:
             ow = outlong
             oh = int(1.0 * h * ow / w)
+            oh = make_divisible(oh, 32)
         else:
             oh = outlong
             ow = int(1.0 * w * oh / h)
+            ow = make_divisible(ow, 32)
         img = img.resize((ow, oh), Image.BILINEAR)
         return img
 
@@ -83,10 +87,10 @@ class BaseDataset(data.Dataset):
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
             mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
-        crop_size = self.crop_size
+        w_crop_size, h_crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = random.randint(int(self.base_size*0.66), int(self.base_size*1.5))
+        long_size = random.randint(int(self.base_size*0.75), int(self.base_size*1.5))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -98,17 +102,17 @@ class BaseDataset(data.Dataset):
         img = img.resize((ow, oh), Image.BILINEAR)
         mask = mask.resize((ow, oh), Image.NEAREST)
         # pad crop  边长比crop_size小就pad
-        if short_size < crop_size:
-            padh = crop_size - oh if oh < crop_size else 0
-            padw = crop_size - ow if ow < crop_size else 0
+        if ow < w_crop_size or oh < h_crop_size:  # crop_size:
+            padh = h_crop_size - oh if oh < h_crop_size else 0
+            padw = w_crop_size - ow if ow < w_crop_size else 0
             img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
             mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=0)  # 为什么mask可以填0:类别0不是训练类别,后续会被填-1(bdd100k也适用)
         # random crop 随机按crop_size从resize和pad的图上crop一块用于训练
         w, h = img.size
-        x1 = random.randint(0, w - crop_size)
-        y1 = random.randint(0, h - crop_size)
-        img = img.crop((x1, y1, x1+crop_size, y1+crop_size))
-        mask = mask.crop((x1, y1, x1+crop_size, y1+crop_size))
+        x1 = random.randint(0, w - w_crop_size)
+        y1 = random.randint(0, h - h_crop_size)
+        img = img.crop((x1, y1, x1+w_crop_size, y1+h_crop_size))
+        mask = mask.crop((x1, y1, x1+w_crop_size, y1+h_crop_size))
         # final transform
         return img, self._mask_transform(mask)
 
@@ -255,12 +259,12 @@ def get_city_pairs(folder, split='train'):
 
 
 def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
-                     base_size=2048, crop_size=768,
+                     base_size=800, crop_size=(832, 416),
                      batch_size=32, workers=4, pin=True):
     if mode == "train":
         input_transform = transforms.Compose([
-            transforms.ColorJitter(brightness=0.3, contrast=0.3,
-                                   saturation=0.3, hue=0.1),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2,
+                                   saturation=0.2, hue=0.1),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
@@ -280,13 +284,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
 
 
 if __name__ == "__main__":
-    trainloader, valloader = get_citys_loader(root='./data/citys/detdata', workers=4, pin=False, batch_size=16)
-    from utils.loss import SegmentationLosses
-    criteria = SegmentationLosses(se_loss=False,
-                                  aux=False,
-                                  nclass=19,
-                                  se_weight=0.2,
-                                  aux_weight=0.2)
+    trainloader = get_citys_loader(root='./data/citys/', split="train", mode="train", base_size=800, crop_size=(832,416), workers=4, pin=True, batch_size=4)
     import time
     t1 = time.time()
     for i, data in enumerate(trainloader):
