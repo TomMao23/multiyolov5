@@ -223,14 +223,15 @@ def train(hyp, opt, device, tb_writer=None):
     # 分割 loader
     seg_trainloader = SegmentationDataset.get_citys_loader(root='data/citys',
                                                            split="train", mode="train",
-                                                           base_size=1280, crop_size=640,
+                                                           base_size=832, crop_size=(832, 416),
                                                            batch_size=total_batch_size,
                                                            workers=opt.workers, pin=True)
     seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=4,
-                                                         split="val", mode="val",
-                                                         base_size=1280, crop_size=640,
+                                                         split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
+                                                         base_size=832,   # 对cityscapes, 原图resize到(800, 400)输入后双线性插值到原图尺寸计算精度
+                                                         #crop_size=640,  # testval 时候cropsize不起作用
                                                          workers=4)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
-                                                                     # 我电脑上4, 4是最快的, 更大子进程会挂
+                                                                     # 我电脑上(4,4)是最快的, 更大子进程会挂
     segnb = len(seg_trainloader)
     # DDP mode
     if cuda and rank != -1:  # 没禁用(-1)就开DDP模型
