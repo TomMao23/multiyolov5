@@ -90,7 +90,7 @@ class BaseDataset(data.Dataset):
         w_crop_size, h_crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = random.randint(int(self.base_size*0.75), int(self.base_size*1.5))
+        long_size = random.randint(int(self.base_size*0.5), int(self.base_size*2))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -259,7 +259,7 @@ def get_city_pairs(folder, split='train'):
 
 
 def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
-                     base_size=800, crop_size=(832, 416),
+                     base_size=832, crop_size=(832, 416),
                      batch_size=32, workers=4, pin=True):
     if mode == "train":
         input_transform = transforms.Compose([
