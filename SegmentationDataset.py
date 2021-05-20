@@ -263,8 +263,8 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
                      batch_size=32, workers=4, pin=True):
     if mode == "train":
         input_transform = transforms.Compose([
-            transforms.ColorJitter(brightness=0.2, contrast=0.2,
-                                   saturation=0.2, hue=0.1),
+            transforms.ColorJitter(brightness=0.35, contrast=0.35,
+                                   saturation=0.35, hue=0.1),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
