@@ -252,7 +252,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Start training
     t0 = time.time()
-    nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations) 最多warmup1000batch
+    nw = max(round(hyp['warmup_epochs'] * nb), 500)  # number of warmup iterations, max(3 epochs, 1k iterations) 最少warmup三轮或500batch(原版1000,500就够了)
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
@@ -265,7 +265,7 @@ def train(hyp, opt, device, tb_writer=None):
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        print(f'accumulate: {accumulate}')  # 显示epoch开始时梯度积累次数(第一个值忽略, 注意warmup期间按batch变化, 此处只是辅助观察)
+        print(f'accumulate: {accumulate}')  # 显示epoch开始时梯度积累次数(第一个值忽略, 注意warmup期间按batch变化, 此处只是辅助观察防梯度爆炸)
         model.train()  # epoch开始, 确保train模式
 
         # Update image weights (optional) 更新image_weights权重, 默认不开image_weights忽略此块代码
@@ -336,7 +336,7 @@ def train(hyp, opt, device, tb_writer=None):
                 loss *= detgain  # 检测loss比例
             scaler.scale(loss).backward()
 
-            imgs = imgs.to(torch.device('cpu'), non_blocking=True)  # 释放
+            imgs = imgs.to(torch.device('cpu'), non_blocking=False)  # 释放 这个non_blocking必须设为False后续操作等待释放完, 否则后续显存申请可能不够, segimgs输入后就没被调用会被pytorch自动回收不用手动释放(img后续有被调用要手动释放)
             segimgs = segimgs.to(device, non_blocking=True)  # 分割已经做过totensor了, 不用/255
 
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
