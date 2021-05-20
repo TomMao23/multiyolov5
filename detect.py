@@ -6,6 +6,7 @@ import cv2
 import torch
 import torch.backends.cudnn as cudnn
 from numpy import random
+import torch.nn.functional as F
 
 from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages
@@ -107,12 +108,11 @@ def detect(save_img=False):
         t1 = time_synchronized()
         out = model(img, augment=opt.augment)
         pred = out[0][0]
-        seg = out[1][0]
+        seg = out[1]  # [0]
         # Apply NMS
         pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
         t2 = time_synchronized()
 
-        mask = label2image(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_COLOMAP)
         # Apply Classifier
         if classify:
             pred = apply_classifier(pred, modelc, img, im0s)
@@ -152,8 +152,10 @@ def detect(save_img=False):
 
             # Print time (inference + NMS)
             print(f'{s}Done. ({t2 - t1:.3f}s)')
-            mask = cv2.resize(mask[:, :, ::-1], (im0.shape[1], im0.shape[0]))
-            dst = cv2.addWeighted(mask, 0.35, im0, 0.65, 0)
+            seg = F.interpolate(seg, (im0.shape[0], im0.shape[1]), mode='bilinear', align_corners=True)[0]
+
+            mask = label2image(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_COLOMAP)[:, :, ::-1]
+            dst = cv2.addWeighted(mask, 0.4, im0, 0.6, 0)
 
             # Stream results
             if view_img:
