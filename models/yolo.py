@@ -25,7 +25,7 @@ except ImportError:
 
 class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征图同Detect (第一版:仅用PAN的1/8处, 但与detect分开处理, 即一个C3, 一个Conv调整成类别通道, 一个8倍上采样)
                                                                    # (第二版:用PAN的1/8处, 一个C3, 2倍上采样, 与2层1/4处1*1卷积通道加倍后结果cat, 一个Conv调整成类别通道, 一个4倍上采样)
-    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_是C3的输出通道数
+    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数
         super(SegMask, self).__init__()
         self.c_in0 = ch[0]
         self.c_in1 = ch[1]
