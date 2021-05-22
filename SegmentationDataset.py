@@ -15,7 +15,9 @@ import torch
 import torch.utils.data as data
 from torchvision import transforms
 from utils.general import make_divisible
-
+from scipy import stats
+import math
+import matplotlib.pyplot as plt
 
 # 基础语义分割类, 各数据集可以继承此类实现
 class BaseDataset(data.Dataset):
@@ -83,6 +85,17 @@ class BaseDataset(data.Dataset):
         return img, self._mask_transform(mask)
 
     def _sync_transform(self, img, mask):  # 训练数据增广
+        def getlongsize(low: float = 0.5,  high: float = 3, std: int = 25) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
+            low = math.ceil((self.base_size * low) / 32)     # getlongsize这种写法效率有点低, 每次调用都有非必要重复, 暂时这么写
+            high = math.ceil((self.base_size * high) / 32)
+            mean = math.ceil(self.base_size / 32)
+            x = list(range(low, high+1))
+            p = stats.norm.pdf(x, mean, std)
+            # pp = p / p.sum() choices权重不用归一化, 归一化用于debug可视化
+            # plt.plot(x, pp)
+            # plt.show()
+            longsize = random.choices(population=x, weights=p, k=1)[0] * 32
+            return longsize
         # random mirror
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
@@ -90,7 +103,7 @@ class BaseDataset(data.Dataset):
         w_crop_size, h_crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = random.randint(int(self.base_size*0.5), int(self.base_size*2))
+        long_size = getlongsize(0.5, 3, 25)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -259,12 +272,12 @@ def get_city_pairs(folder, split='train'):
 
 
 def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
-                     base_size=832, crop_size=(832, 416),
+                     base_size=1024, crop_size=(1024, 512),
                      batch_size=32, workers=4, pin=True):
     if mode == "train":
         input_transform = transforms.Compose([
-            transforms.ColorJitter(brightness=0.35, contrast=0.35,
-                                   saturation=0.35, hue=0.1),
+            transforms.ColorJitter(brightness=0.45, contrast=0.45,
+                                   saturation=0.45, hue=0.15),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
@@ -284,7 +297,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
 
 
 if __name__ == "__main__":
-    trainloader = get_citys_loader(root='./data/citys/', split="train", mode="train", base_size=800, crop_size=(832,416), workers=4, pin=True, batch_size=4)
+    trainloader = get_citys_loader(root='./data/citys/', split="train", mode="train", base_size=1024, crop_size=(1024, 512), workers=4, pin=True, batch_size=4)
     import time
     t1 = time.time()
     for i, data in enumerate(trainloader):
