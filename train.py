@@ -221,17 +221,18 @@ def train(hyp, opt, device, tb_writer=None):
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
     # 分割 loader
-    seg_trainloader = SegmentationDataset.get_citys_loader(root='data/citys',
-                                                           split="train", mode="train",
-                                                           base_size=1024, crop_size=(1024, 512),
-                                                           batch_size=total_batch_size,
-                                                           workers=opt.workers, pin=True)
-    seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=4,
+        seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=batch_size*2,
                                                          split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
                                                          base_size=1024,   # 对cityscapes, 原图resize到(800, 400)输入后双线性插值到原图尺寸计算精度
                                                          # crop_size=640,  # testval 时候cropsize不起作用
                                                          workers=4)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
                                                                      # 我电脑上(4,4)是最快的, 更大子进程会挂(现在图大了,怎么设都会挂, BUG)
+    seg_trainloader = SegmentationDataset.get_citys_loader(root='data/citys',
+                                                           split="train", mode="train",
+                                                           base_size=1024, crop_size=(1024, 512),
+                                                           batch_size=batch_size,
+                                                           workers=opt.workers, pin=True)
+
     segnb = len(seg_trainloader)
     # DDP mode
     if cuda and rank != -1:  # 没禁用(-1)就开DDP模型
