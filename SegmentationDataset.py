@@ -17,6 +17,7 @@ from torchvision import transforms
 from utils.general import make_divisible
 from scipy import stats
 import math
+from functools import lru_cache
 import matplotlib.pyplot as plt
 
 # 基础语义分割类, 各数据集可以继承此类实现
@@ -85,17 +86,23 @@ class BaseDataset(data.Dataset):
         return img, self._mask_transform(mask)
 
     def _sync_transform(self, img, mask):  # 训练数据增广
-        def getlongsize(low: float = 0.5,  high: float = 3, std: int = 25) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
-            low = math.ceil((self.base_size * low) / 32)     # getlongsize这种写法效率有点低, 每次调用都有非必要重复, 暂时这么写
+        @lru_cache(None)  # 目前每次调用参数都是一样的, 用cache加速, 有random的地方不能用cache
+        def range_and_prob(low: float = 0.5,  high: float = 3, std: int = 25) -> list:
+            low = math.ceil((self.base_size * low) / 32)
             high = math.ceil((self.base_size * high) / 32)
             mean = math.ceil(self.base_size / 32)
-            x = list(range(low, high+1))
+            x = list(range(low, high + 1))
             p = stats.norm.pdf(x, mean, std)
-            # pp = p / p.sum() choices权重不用归一化, 归一化用于debug可视化
+            return [x, p]
+
+        def get_long_size(low: float = 0.5,  high: float = 3, std: int = 25) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
+            x, p = range_and_prob(low, high, std)
+            # pp = p / p.sum() choices权重不用归一化, 归一化用于debug和可视化调参std
             # plt.plot(x, pp)
             # plt.show()
             longsize = random.choices(population=x, weights=p, k=1)[0] * 32
             return longsize
+
         # random mirror
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
@@ -103,7 +110,7 @@ class BaseDataset(data.Dataset):
         w_crop_size, h_crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = getlongsize(0.5, 3, 25)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
+        long_size = get_long_size(0.5, 3, 25)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
