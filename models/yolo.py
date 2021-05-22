@@ -27,39 +27,33 @@ class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征�
                                                                    # (第二版:用PAN的1/8处, 一个C3, 2倍上采样, 与2层1/4处1*1卷积通道加倍后结果cat, 一个Conv调整成类别通道, 一个4倍上采样)
     def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数
         super(SegMask, self).__init__()
-        self.c_in0 = ch[0]
-        self.c_in1 = ch[1]
-        self.c_out = n_segcls
-        self.m0 = nn.Sequential(C3(c1=self.c_in0, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),   # 16 1/8
-                                )
-        self.m1 = nn.Sequential(C3(c1=self.c_in1, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),   # 19 1/16
-                                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-                                )
-        self.cat = Concat(1)
-        self.m = nn.Sequential(nn.Dropout(0.1, False),
-                               nn.Conv2d(c_hid*2, self.c_out, kernel_size=(1, 1), stride=(1, 1),
-                                         padding=(0, 0), groups=1, bias=False),  # kernel 1*1, 不激活不BN
-                               nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True))
-
-    def forward(self, x):
-        return self.m(self.cat([self.m0(x[0]), self.m1(x[1])]))
-    #     self.c_in = ch[0]  # 此版本Head暂时只有一层输入
+    #     self.c_in0 = ch[0]
+    #     self.c_in1 = ch[1]
     #     self.c_out = n_segcls
-    #     self.m = nn.Sequential(C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
-    #                            nn.Dropout(0.1, False),
-    #                            nn.Conv2d(c_hid, self.c_out, kernel_size=(1, 1), stride=(1, 1),
+    #     self.m0 = nn.Sequential(C3(c1=self.c_in0, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),   # 16 1/8
+    #                             )
+    #     self.m1 = nn.Sequential(C3(c1=self.c_in1, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),   # 19 1/16
+    #                             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+    #                             )
+    #     self.cat = Concat(1)
+    #     self.m = nn.Sequential(nn.Dropout(0.1, False),
+    #                            nn.Conv2d(c_hid*2, self.c_out, kernel_size=(1, 1), stride=(1, 1),
     #                                      padding=(0, 0), groups=1, bias=False),  # kernel 1*1, 不激活不BN
-    #                            nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True), )
+    #                            nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True))
     #
     # def forward(self, x):
-    #     return self.m(x[0])  # self.up(self.conv(self.c3(x[0])))
-
-class InstMask(nn.Module):  # TODO: 实例分割头, 计划尝试论文BoxInst的方法, 仅用检测数据训练实例分割
-    def __init__(self):
-        super(InstMask, self).__init__()
+    #     return self.m(self.cat([self.m0(x[0]), self.m1(x[1])]))
+        self.c_in = ch[0]  # 此版本Head暂时只有一层输入
+        self.c_out = n_segcls
+        self.m = nn.Sequential(C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
+                               # C3(c1=c_hid, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
+                               nn.Dropout(0.1, True),
+                               nn.Conv2d(c_hid, self.c_out, kernel_size=(3, 3), stride=(1, 1),
+                                         padding=(1, 1), groups=1, bias=False),  # kernel 1*1, 不激活不BN
+                               nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True), )
 
     def forward(self, x):
-        pass
+        return self.m(x[0])  # self.up(self.conv(self.c3(x[0])))
 
 
 class Detect(nn.Module):  # 检测头
