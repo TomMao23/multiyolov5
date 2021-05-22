@@ -20,6 +20,18 @@ import math
 from functools import lru_cache
 import matplotlib.pyplot as plt
 
+
+# 见_sync_transform, 生成采样范围和概率密度
+@lru_cache(None)  # 目前每次调用参数都是一样的, 用cache加速, 有random的地方不能用cache
+def range_and_prob(base_size, low: float = 0.5, high: float = 3, std: int = 25) -> list:
+    low = math.ceil((base_size * low) / 32)
+    high = math.ceil((base_size * high) / 32)
+    mean = math.ceil(base_size / 32)
+    x = list(range(low, high + 1))
+    p = stats.norm.pdf(x, mean, std)
+    return [x, p]
+
+
 # 基础语义分割类, 各数据集可以继承此类实现
 class BaseDataset(data.Dataset):
     def __init__(self, root, split, mode=None, transform=None,
@@ -86,17 +98,8 @@ class BaseDataset(data.Dataset):
         return img, self._mask_transform(mask)
 
     def _sync_transform(self, img, mask):  # 训练数据增广
-        @lru_cache(None)  # 目前每次调用参数都是一样的, 用cache加速, 有random的地方不能用cache
-        def range_and_prob(low: float = 0.5,  high: float = 3, std: int = 25) -> list:
-            low = math.ceil((self.base_size * low) / 32)
-            high = math.ceil((self.base_size * high) / 32)
-            mean = math.ceil(self.base_size / 32)
-            x = list(range(low, high + 1))
-            p = stats.norm.pdf(x, mean, std)
-            return [x, p]
-
         def get_long_size(low: float = 0.5,  high: float = 3, std: int = 25) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
-            x, p = range_and_prob(low, high, std)
+            x, p = range_and_prob(self.base_size, low, high, std)
             # pp = p / p.sum() choices权重不用归一化, 归一化用于debug和可视化调参std
             # plt.plot(x, pp)
             # plt.show()
