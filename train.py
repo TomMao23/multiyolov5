@@ -221,7 +221,7 @@ def train(hyp, opt, device, tb_writer=None):
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
     # 分割 loader
-        seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=batch_size*2,
+        seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=batch_size,
                                                          split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
                                                          base_size=1024,   # 对cityscapes, 原图resize到(800, 400)输入后双线性插值到原图尺寸计算精度
                                                          # crop_size=640,  # testval 时候cropsize不起作用
