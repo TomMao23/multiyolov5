@@ -46,6 +46,8 @@ class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征�
         self.c_in = ch[0]  # 此版本Head暂时只有一层输入
         self.c_out = n_segcls
         self.m = nn.Sequential(C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
+                               SPP(c_hid, c_hid, k=(5, 9, 13)),
+                               #C3(c1=c_hid, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
                                # C3(c1=c_hid, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
                                nn.Dropout(0.1, True),
                                nn.Conv2d(c_hid, self.c_out, kernel_size=(3, 3), stride=(1, 1),
