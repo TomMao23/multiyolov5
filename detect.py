@@ -64,7 +64,7 @@ def detect(save_img=False):
     set_logging()
     device = select_device(opt.device)
     half = device.type != 'cpu'  # half precision only supported on CUDA 原始代码,cpu用float32,gpu用float16
-    half = False  # 强制禁用float16推理, 20和30系列显卡有tensor cores float16, 10系列卡不开cudnn.benchmark速度反而降
+    #half = False  # 强制禁用float16推理, 20和30系列显卡有tensor cores float16, 10系列卡不开cudnn.benchmark速度反而降
     # Load model
     model = attempt_load(weights, map_location=device)  # load FP32 model
     stride = int(model.stride.max())  # model stride
@@ -79,7 +79,7 @@ def detect(save_img=False):
         modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()
 
     # Set Dataloader
-    vid_path, vid_writer = None, None
+    vid_path, vid_writer, s_writer = None, None, None
     if webcam:
         view_img = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
@@ -87,6 +87,7 @@ def detect(save_img=False):
                                 # 算法速度不仅与复杂度有关,也与输入规模相关,因此要求后续输入同尺寸,原版仅在视频测试时开启,想测真实速度其实应该开启
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     else:
+        cudnn.benchmark = True
         dataset = LoadImages(source, img_size=imgsz, stride=stride)  # 跑的是这个
 
     # Get names and colors
@@ -171,7 +172,7 @@ def detect(save_img=False):
                     cv2.imwrite(save_path[:-4]+"_mask"+save_path[-4:], mask)
                     cv2.imwrite(save_path[:-4]+"_dst"+save_path[-4:], dst)
 
-                else:  # 'video' or 'stream'
+                else: # 'video' or 'stream'
                     if vid_path != save_path:  # new video
                         vid_path = save_path
                         if isinstance(vid_writer, cv2.VideoWriter):
@@ -181,15 +182,19 @@ def detect(save_img=False):
                             w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                             h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         else:  # stream
-                            fps, w, h = 30, im0.shape[1], im0.shape[0]
+                            fps, w, h = 30, dst.shape[1], dst.shape[0]
                             save_path += '.mp4'
                         vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer.write(im0)
-
+                    vid_writer.write(dst)#(im0)
+            if opt.save_as_video:
+                if not s_writer:
+                    fps, w, h = 30, dst.shape[1], dst.shape[0]
+                    s_writer = cv2.VideoWriter(str(save_dir)+"out.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                s_writer.write(dst)
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         print(f"Results saved to {save_dir}{s}")
-
+    s_writer.release()
     print(f'Done. ({time.time() - t0:.3f}s)')
 
 
@@ -212,6 +217,7 @@ if __name__ == '__main__':
     parser.add_argument('--project', default='runs/detect', help='save results to project/name')
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    parser.add_argument('--save-as-video', action='store_true', help='save same size images as a video')
     opt = parser.parse_args()
     print(opt)
     check_requirements(exclude=('pycocotools', 'thop'))
