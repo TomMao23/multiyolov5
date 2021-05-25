@@ -30,7 +30,7 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss, SegmentationLosses
+from utils.loss import ComputeLoss, SegmentationLosses, SegFocalLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
@@ -260,7 +260,7 @@ def train(hyp, opt, device, tb_writer=None):
     scheduler.last_epoch = start_epoch - 1  # do not move 配置lr_scheduler起始位置
     scaler = amp.GradScaler(enabled=cuda)  # 说明不是float16训练,而是16和32混合精度训练. 训练前初始化loss scaler 用于float16放大梯度后backward, optimizer.step之前自动转float32再缩回来
     compute_loss = ComputeLoss(model)  # init loss class 初始化检测criteria
-    compute_seg_loss = SegmentationLosses(nclass=19, aux=False).cuda()  # 分割loss,(19仅代表cityscapes) 暂时纯CE loss, 忽略-1的标签, 不支持cpu和多卡gpu训练
+    compute_seg_loss = SegmentationLosses(nclass=19, aux=False, ignore_index=-1).cuda()#SegFocalLoss(ignore_index=-1, gamma=1, reduction="mean").cuda()  # 分割loss,(19仅代表cityscapes) 暂时纯CE loss, 忽略-1的标签, 不支持cpu和多卡gpu训练
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
@@ -326,7 +326,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward and Backward 对比原版yolov5此处修改, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
 
-            detgain, seggain = 0.65, 0.35  # 检测, 分割比例
+            detgain, seggain = 0.65, 0.35  # 检测, 分割比例  0.65,0.35
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size
@@ -342,7 +342,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(segimgs)
-                segloss = compute_seg_loss(pred[1], segtargets.to(device)) * total_batch_size # 分割loss CE是平均loss, 配合检测做梯度积累, 因此乘以batchsize(注意有梯度积累其真实batchsize约是nbs=64)
+                segloss = compute_seg_loss(pred[1], segtargets.to(device)) * batch_size # 分割loss CE是平均loss, 配合检测做梯度积累, 因此乘以batchsize(注意有梯度积累其真实batchsize约是nbs=64)
                 segloss *= seggain
             scaler.scale(segloss).backward()
             # segimgs = segimgs.to(torch.device('cpu'), non_blocking=False) #释放
@@ -392,7 +392,8 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
             # pixACC, mIoU
-            test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
+            if epoch % 2 == 0:
+                test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
                                 half_precision=True)
             # mAP
             final_epoch = epoch + 1 == epochs  # 是否是最后一轮
