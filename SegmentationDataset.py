@@ -21,16 +21,14 @@ from functools import lru_cache
 import matplotlib.pyplot as plt
 
 
-# 见_sync_transform, 生成采样范围和概率密度
 @lru_cache(None)  # 目前每次调用参数都是一样的, 用cache加速, 有random的地方不能用cache
-def range_and_prob(base_size, low: float = 0.5, high: float = 3, std: int = 25) -> list:
+def range_and_prob(base_size, low: float = 0.5,  high: float = 3, std: int = 25) -> list:
     low = math.ceil((base_size * low) / 32)
     high = math.ceil((base_size * high) / 32)
-    mean = math.ceil(base_size / 32)
+    mean = math.ceil(base_size / 32) # - 2  # 峰值略偏
     x = list(range(low, high + 1))
     p = stats.norm.pdf(x, mean, std)
     return [x, p]
-
 
 # 基础语义分割类, 各数据集可以继承此类实现
 class BaseDataset(data.Dataset):
