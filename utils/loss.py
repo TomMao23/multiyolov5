@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-# import torch.nn.functional as F
+import torch.nn.functional as F
 from utils.general import bbox_iou
 from utils.torch_utils import is_parallel
 from torch.autograd import Variable
@@ -265,3 +265,23 @@ class SegmentationLosses(nn.CrossEntropyLoss):
             vect = hist>0
             tvect[i] = vect
         return tvect
+
+class SegFocalLoss(nn.CrossEntropyLoss):
+    ''' Focal loss for classification tasks on imbalanced datasets '''
+
+    def __init__(self, gamma=2, alpha=None, ignore_index=-100, reduction='mean'):
+        super().__init__(weight=alpha, ignore_index=ignore_index, reduction='mean')
+        self.reduction = reduction
+        self.gamma = gamma
+
+    def forward(self, input_, target):
+        cross_entropy = super().forward(input_, target)
+        # Temporarily mask out ignore index to '0' for valid gather-indices input.
+        # This won't contribute final loss as the cross_entropy contribution
+        # for these would be zero.
+        target = target * (target != self.ignore_index).long()
+        input_prob = torch.gather(F.softmax(input_, 1), 1, target.unsqueeze(1))
+        loss = torch.pow(1 - input_prob, self.gamma) * cross_entropy
+        if self.reduction == 'mean': return torch.mean(loss)
+        elif self.reduction == 'sum': return torch.sum(loss)
+        else: return loss
