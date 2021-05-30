@@ -1,7 +1,7 @@
 import argparse
 import time
 from pathlib import Path
-
+import os
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -38,6 +38,28 @@ Cityscapes_COLOMAP = [
     [119, 11, 32],
 ]
 
+Cityscapes_IDMAP = [
+    [7],
+    [8],
+    [11],
+    [12],
+    [13],
+    [17],
+    [19],
+    [20],
+    [21],
+    [22],
+    [23],
+    [24],
+    [25],
+    [26],
+    [27],
+    [28],
+    [31],
+    [32],
+    [33],
+]
+
 Cityscapes_Class = ["road", "sidewalk", "building", "wall", "fence",
                "pole", "traffic light", "traffic sign", "vegetation",
                "terrain", "sky", "person", "rider", "car", "truck",
@@ -49,6 +71,10 @@ def label2image(pred, COLORMAP=Cityscapes_COLOMAP):
     X = pred.astype('int32')
     return colormap[X, :]
 
+def id2trainid(pred, IDMAP=Cityscapes_IDMAP):
+    colormap = np.array(IDMAP, dtype='uint8')
+    X = pred.astype('int32')
+    return colormap[X, :]
 
 def detect(save_img=False):
     source, weights, view_img, save_txt, imgsz = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size
@@ -59,12 +85,16 @@ def detect(save_img=False):
     # Directories
     save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+    if opt.submit:
+        sub_dir = str(save_dir) + "/results/"
+        if not os.path.exists(sub_dir):
+            os.mkdir(sub_dir)
 
     # Initialize
     set_logging()
     device = select_device(opt.device)
     half = device.type != 'cpu'  # half precision only supported on CUDA 原始代码,cpu用float32,gpu用float16
-    #half = False  # 强制禁用float16推理, 20和30系列显卡有tensor cores float16, 10系列卡不开cudnn.benchmark速度反而降
+    # half = False  # 强制禁用float16推理, 20和30系列显卡有tensor cores float16, 10系列卡不开cudnn.benchmark速度反而降
     # Load model
     model = attempt_load(weights, map_location=device)  # load FP32 model
     stride = int(model.stride.max())  # model stride
@@ -166,6 +196,11 @@ def detect(save_img=False):
                 cv2.imshow("mix", dst)
                 cv2.waitKey(0)  # 1 millisecond
 
+            if opt.submit:
+                sub_path = sub_dir+str(p.name)
+                sub_path = sub_path[:-4] + "_pred.png"
+                result = id2trainid(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_IDMAP)
+                cv2.imwrite(sub_path, result)
             # Save results (image with detections)
             if save_img:
                 if dataset.mode == 'image':
@@ -220,6 +255,7 @@ if __name__ == '__main__':
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--save-as-video', action='store_true', help='save same size images as a video')
+    parser.add_argument('--submit', action='store_true', help='get submit file in folder submit')
     opt = parser.parse_args()
     print(opt)
     check_requirements(exclude=('pycocotools', 'thop'))
