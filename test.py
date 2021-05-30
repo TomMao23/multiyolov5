@@ -34,7 +34,7 @@ def seg_validation(model, n_segcls, valloader, device, half_precision=True):
         outputs = model(image)
         # outputs = gather(outputs, 0, dim=0)
         pred = outputs[1]  # 1是分割
-        target = target.cuda()
+        target = target.to(device, non_blocking=True)
         pred = F.interpolate(pred, (target.shape[1], target.shape[2]), mode='bilinear', align_corners=True)
         correct, labeled = batch_pix_accuracy(pred.data, target)
         inter, union = batch_intersection_union(pred.data, target, n_segcls)
@@ -61,6 +61,8 @@ def seg_validation(model, n_segcls, valloader, device, half_precision=True):
         mIoU = IoU.mean()
         tbar.set_description(
             'pixAcc: %.3f, mIoU: %.3f' % (pixAcc, mIoU))
+    # print(mIoU)
+    return mIoU
 
 
 def segtest(weights, root="data/citys", batch_size=16, half_precision=True, n_segcls=19, base_size=2048):  # 会使用原始尺寸测, 未考虑尺寸对不齐, 图片尺寸应为32倍数

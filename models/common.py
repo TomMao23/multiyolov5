@@ -138,6 +138,52 @@ class C3(nn.Module):  # 5.0版本模型backbone和head用的都是这个
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
 
 
+class C3SPP(nn.Module):  
+    def __init__(self, c1, c2, k=(5, 9, 13), g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+        super(C3SPP, self).__init__()
+        c_ = int(c1 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(c_ + int(c_*1.5), c2, 1)  # act=FReLU(c2)
+        self.m = SPP(c_, int(c_*1.5), k=k)
+        # self.m = nn.Sequential(*[CrossConv(c_, c_, 3, 1, g, 1.0, shortcut) for _ in range(n)])
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+
+
+class C3SPPD(nn.Module):  # C3SPP with dropout2d after cat
+    def __init__(self, c1, c2, k=(5, 9, 13, 17), g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+        super(C3SPPD, self).__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)  # act=FReLU(c2)
+        self.m = SPP(c_, c_, k=k)
+        self.drop2d = nn.Dropout2d(0.3)
+        # self.m = nn.Sequential(*[CrossConv(c_, c_, 3, 1, g, 1.0, shortcut) for _ in range(n)])
+    def forward(self, x):
+        return self.cv3(self.drop2d(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1)))
+
+
+class C3SPP2(nn.Module):  
+    def __init__(self, c1, c2, k=(5, 9, 13), n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+        super(C3SPP2, self).__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(c_ + c_, c2, 1)  # act=FReLU(c2)
+        self.m = nn.Sequential(C3(c1=c_, c2=c_, n=n, shortcut=shortcut, g=1, e=0.5),
+                               C3(c1=c_, c2=c_, n=n, shortcut=shortcut, g=1, e=0.5),
+                               C3(c1=c_, c2=c_, n=n, shortcut=shortcut, g=1, e=0.5),
+                               SPP(c_, c_, k=k),
+                               #*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)]  # n个不带残差的瓶颈组件(Bottleneck)
+                               
+                              )
+        # self.m = nn.Sequential(*[CrossConv(c_, c_, 3, 1, g, 1.0, shortcut) for _ in range(n)])
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+
+
 class C3TR(C3):
     # C3 module with TransformerBlock()
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
@@ -154,6 +200,20 @@ class SPP(nn.Module):
         self.cv1 = Conv(c1, c_, 1, 1)  # 输入卷一次
         self.cv2 = Conv(c_ * (len(k) + 1), c2, 1, 1)  # 输出卷一次(输入通道:SPP的len(k)个尺度cat后加输入)
         self.m = nn.ModuleList([nn.MaxPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
+
+    def forward(self, x):
+        x = self.cv1(x)
+        return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))
+
+
+class SPPM(nn.Module):  # replace Max by Avg
+    # Spatial pyramid pooling layer used in YOLOv3-SPP # ModuleLis容器多分支实现SPP
+    def __init__(self, c1, c2, k=(5, 9, 13)):
+        super(SPPM, self).__init__()
+        c_ = c1 // 2  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)  # 输入卷一次
+        self.cv2 = Conv(c_ * (len(k) + 1), c2, 1, 1)  # 输出卷一次(输入通道:SPP的len(k)个尺度cat后加输入)
+        self.m = nn.ModuleList([nn.AvgPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
 
     def forward(self, x):
         x = self.cv1(x)

@@ -84,7 +84,7 @@ def detect(save_img=False):
         view_img = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
                                 # 开启后第一次推理会把各种后端算法测试一遍,后续推理都用最快的算法,会有较明显加速
-                                # 算法速度不仅与复杂度有关,也与输入规模相关,因此要求后续输入同尺寸,原版仅在视频测试时开启,想测真实速度其实应该开启
+                                # 算法速度不仅与复杂度有关,也与输入规模相关,因此要求后续输入同尺寸,原版仅在视频测试时开启,想测真实速度应该开启
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     else:
         cudnn.benchmark = True
@@ -106,13 +106,14 @@ def detect(save_img=False):
             img = img.unsqueeze(0)
 
         # Inference
-        t1 = time_synchronized()
-        out = model(img, augment=opt.augment)
-        pred = out[0][0]
-        seg = out[1]  # [0]
+        with torch.no_grad():
+            t1 = time_synchronized()
+            out = model(img, augment=opt.augment)
+            pred = out[0][0]
+            seg = out[1]  # [0]
         # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
-        t2 = time_synchronized()
+            pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+            t2 = time_synchronized()
 
         # Apply Classifier
         if classify:
@@ -152,7 +153,7 @@ def detect(save_img=False):
                         plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
 
             # Print time (inference + NMS)
-            print(f'{s}Done. ({t2 - t1:.3f}s)')
+            print(f'{s}Done. ({t2 - t1:.5f}s)')
             seg = F.interpolate(seg, (im0.shape[0], im0.shape[1]), mode='bilinear', align_corners=True)[0]
 
             mask = label2image(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_COLOMAP)[:, :, ::-1]
@@ -194,7 +195,8 @@ def detect(save_img=False):
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         print(f"Results saved to {save_dir}{s}")
-    s_writer.release()
+    if s_writer != None:
+        s_writer.release()
     print(f'Done. ({time.time() - t0:.3f}s)')
 
 

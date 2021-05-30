@@ -19,6 +19,7 @@ from scipy import stats
 import math
 from functools import lru_cache
 import matplotlib.pyplot as plt
+from random import choices
 
 
 @lru_cache(None)  # 目前每次调用参数都是一样的, 用cache加速, 有random的地方不能用cache
@@ -29,6 +30,16 @@ def range_and_prob(base_size, low: float = 0.5,  high: float = 3, std: int = 25)
     x = list(range(low, high + 1))
     p = stats.norm.pdf(x, mean, std)
     return [x, p]
+
+
+def get_long_size(base_size:int, low: float = 0.5,  high: float = 4, std: int = 40) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
+    x, p = range_and_prob(base_size, low, high, std)
+    # pp = p / p.sum() choices权重不用归一化, 归一化用于debug和可视化调参std
+    # plt.plot(x, pp)
+    # plt.show()
+    longsize = choices(population=x, weights=p, k=1)[0] * 32
+    return longsize
+
 
 # 基础语义分割类, 各数据集可以继承此类实现
 class BaseDataset(data.Dataset):
@@ -96,14 +107,6 @@ class BaseDataset(data.Dataset):
         return img, self._mask_transform(mask)
 
     def _sync_transform(self, img, mask):  # 训练数据增广
-        def get_long_size(low: float = 0.5,  high: float = 3, std: int = 25) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
-            x, p = range_and_prob(self.base_size, low, high, std)
-            # pp = p / p.sum() choices权重不用归一化, 归一化用于debug和可视化调参std
-            # plt.plot(x, pp)
-            # plt.show()
-            longsize = random.choices(population=x, weights=p, k=1)[0] * 32
-            return longsize
-
         # random mirror
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
@@ -111,7 +114,7 @@ class BaseDataset(data.Dataset):
         w_crop_size, h_crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = get_long_size(0.5, 3, 25)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
+        long_size = get_long_size(base_size=self.base_size, low=0.5, high=3.5, std=45)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -299,7 +302,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
                                base_size=base_size, crop_size=crop_size)
 
     loader = data.DataLoader(dataset, batch_size=batch_size,
-                             drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,
+                             drop_last=  False, shuffle=True if mode == "train" else False,
                              num_workers=workers, pin_memory=pin)
     return loader
 

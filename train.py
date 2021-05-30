@@ -27,7 +27,7 @@ from models.yolo import Model
 from utils.autoanchor import check_anchors
 from utils.datasets import create_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
-    fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
+    fitness, fitness2, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
 from utils.loss import ComputeLoss, SegmentationLosses, SegFocalLoss
@@ -35,6 +35,8 @@ from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 import SegmentationDataset
+import torch.backends.cudnn as cudnn
+
 
 logger = logging.getLogger(__name__)
 
@@ -221,11 +223,11 @@ def train(hyp, opt, device, tb_writer=None):
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
     # 分割 loader
-        seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=batch_size,
+        seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=4,
                                                          split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
                                                          base_size=1024,   # 对cityscapes, 原图resize到(800, 400)输入后双线性插值到原图尺寸计算精度
                                                          # crop_size=640,  # testval 时候cropsize不起作用
-                                                         workers=4)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
+                                                         workers=4, pin=True)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
                                                                      # 我电脑上(4,4)是最快的, 更大子进程会挂(现在图大了,怎么设都会挂, BUG)
     seg_trainloader = SegmentationDataset.get_citys_loader(root='data/citys',
                                                            split="train", mode="train",
@@ -253,7 +255,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Start training
     t0 = time.time()
-    nw = max(round(hyp['warmup_epochs'] * nb), 500)  # number of warmup iterations, max(3 epochs, 1k iterations) 最少warmup三轮或500batch(原版1000,500就够了)
+    nw = max(round(hyp['warmup_epochs'] * nb), 800)  # number of warmup iterations, max(3 epochs, 1k iterations) 最少warmup三轮或500batch(原版1000,800就够了)
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
@@ -266,8 +268,9 @@ def train(hyp, opt, device, tb_writer=None):
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+        mIoU = 0  # 每轮开始mIoU设置成０，因为选模型按ｍIoU选，为了加速训练可能ｎ轮才测一次mIoU，对没测mIoU的模型不会存为best.pt
         print(f'accumulate: {accumulate}')  # 显示epoch开始时梯度积累次数(第一个值忽略, 注意warmup期间按batch变化, 此处只是辅助观察防梯度爆炸)
-        model.train()  # epoch开始, 确保train模式
+        model.train()  # epoch开始, 确保train模式 注意validation时候可能会把模型.eval()因此开始的train()很有必要
 
         # Update image weights (optional) 更新image_weights权重, 默认不开image_weights忽略此块代码
         if opt.image_weights:
@@ -336,8 +339,12 @@ def train(hyp, opt, device, tb_writer=None):
                     loss *= 4.
                 loss *= detgain  # 检测loss比例
             scaler.scale(loss).backward()
-
-            imgs = imgs.to(torch.device('cpu'), non_blocking=True)  # 释放 这个non_blocking必须设为False后续操作等待释放完, 否则后续显存申请可能不够, segimgs输入后就没被调用会被pytorch自动回收不用手动释放(img后续有被调用要手动释放)
+            imgshape = imgs.shape[-1]
+            if plots and ni >= 3:
+                del imgs
+            else:
+                imgs = imgs.to(torch.device('cpu'), non_blocking=True)  # 释放 这个non_blocking显存紧张时设为False后续操作等待释放完, 否则后续显存申请可能不够, segimgs输入后就没被调用会被pytorch自动回收不用手动释放(img后续有被调用要手动释放)
+            
             segimgs = segimgs.to(device, non_blocking=True)  # 分割已经做过totensor了, 不用/255
 
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
@@ -346,7 +353,7 @@ def train(hyp, opt, device, tb_writer=None):
                 segloss *= seggain
             scaler.scale(segloss).backward()
             # segimgs = segimgs.to(torch.device('cpu'), non_blocking=False) #释放
-
+            del segimgs
             # # Backward  # 混合精度训练反传时用scalar自动scale梯度
             # seggain = 1
             # mixloss = (loss + seggain*segloss) / 2.0
@@ -366,7 +373,7 @@ def train(hyp, opt, device, tb_writer=None):
                 msegloss = (msegloss * i + segloss.detach()/total_batch_size) / (i + 1)
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
                 s = ('%10s' * 2 + '%10.4g' * 7) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, msegloss, targets.shape[0], imgs.shape[-1])
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, msegloss, targets.shape[0], imgshape)
                 pbar.set_description(s)
 
                 # Plot
@@ -392,8 +399,8 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
             # pixACC, mIoU
-            if epoch % 2 == 0:
-                test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
+            if epoch % 10 == 0 or (epochs - epoch) < 45:
+                mIoU = test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
                                 half_precision=True)
             # mAP
             final_epoch = epoch + 1 == epochs  # 是否是最后一轮
@@ -429,8 +436,10 @@ def train(hyp, opt, device, tb_writer=None):
                 if wandb_logger.wandb:
                     wandb_logger.log({tag: x})  # W&B
 
-            # Update best mAP
-            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95] 按0.1*AP.5+0.9*AP.5:.95指标衡量模型
+            # Update best mIoU  #mAP
+            # fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95] 按0.1*AP.5+0.9*AP.5:.95指标衡量模型
+            fi = fitness2(np.array(results).reshape(1, -1), mIoU)  # weighted combination of [P, R, mAP@.5, mAP@.5-.95] 按0.1*AP.5+0.9*AP.5:.95指标衡量模型
+
             if fi > best_fitness:
                 best_fitness = fi
             wandb_logger.end_epoch(best_result=best_fitness == fi)
@@ -537,6 +546,7 @@ if __name__ == '__main__':
     parser.add_argument('--bbox_interval', type=int, default=-1, help='Set bounding-box image logging interval for W&B')
     parser.add_argument('--save_period', type=int, default=-1, help='Log model after every "save_period" epoch')
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
+
     opt = parser.parse_args()
 
     # Set DDP variables  DDP常规初始化
