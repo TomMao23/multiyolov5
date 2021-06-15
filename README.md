@@ -1,7 +1,7 @@
 # Multi YOLO V5——Detection and Semantic Segmentation
 ## Overeview
 This is my undergraduate graduation project which forks from <a href="https://github.com/ultralytics/yolov5"> ultralytics YOLO V5 tag v5.0</a>.  
-This multi-task model adds only a small amount of computation and inferential GPU memory (about 350MB) and is able to accomplish both object detection and semantic segmentation. Object detection metrics are slightly improved (compared to single-task YOLO) on my dataset (transfer from Cityscapes Instance Segmentation labels) and Cityscapes semantic segmentation metrics are shown below. **This repository will not be updated in the near future(after tag TomMao-2.0 realse)** and a **more engineered version** will probably be released in [MANA AI](http://www.manaai.cn).This project will not be attempted nor is it worth publishing a paper , but its performance is great thanks to the original ultralytics/yolov5. To save my time and facilitate handover, please forgive me for the following document will be written in Chinese.  
+This multi-task model adds only a small amount of computation and inferential GPU memory (about 350MB) and is able to accomplish both object detection and semantic segmentation. Object detection metrics are slightly improved (compared to single-task YOLO) on my dataset (transfer from Cityscapes Instance Segmentation labels) and Cityscapes semantic segmentation metrics are shown below. **This repository will not be updated in the near future(after tag TomMao-2.0 realse)** and a **more engineered version** will probably be released in [MANA AI](http://www.manaai.cn).This project will not be attempted nor is it worth publishing a paper, but its performance is great thanks to the original ultralytics/yolov5. To save my time and facilitate handover, please forgive me for the following document will be written in Chinese.  
 [Demo Video](https://www.bilibili.com/video/BV1Yv411p7Js)  
 ![avatar](./githubimage/37.jpg)
 In the semantic segmentation section, I refer to the following code:
@@ -11,7 +11,7 @@ In the semantic segmentation section, I refer to the following code:
 4. [YudeWang/semantic-segmentation-codebase: Codebase for semantic segmentation experiments (github.com)](https://github.com/YudeWang/semantic-segmentation-codebase)  
 
 这是我的本科毕设，基于ultralytics的YOLO V5多任务模型。以增加少量计算和显存为代价，同时完成目标检测和语义分割(1024×512输入约为350MB，不开cudnn.benchmark测量，同尺寸增加一个bisenet需要约1.3GB，两个单任务模型独立输入还会有额外的延时)。模型在Cityscapes语义分割数据集和由Cityscapes实例分割标签转换来的目标检测数据集上同时训练，检测结果略好于原版单任务的YOLOV5(仅限于此实验数据集)，分割指标s模型验证集mIoU 0.73，测试集0.715；ｍ模型验证集mIoU 0.75测试集0.735。由于将继续考研，tag 2.0发布后仓库近期不会再更新，issue近期大概率不会回复(问题请参考以下Doc)，未来版本可能由其他人整理/重构发布在[MANA AI](http://www.manaai.cn)。模型测试集指标对比如上图，可视化如下图  
-效果视频见[bilibili](https://www.bilibili.com/video/BV1Yv411p7Js)  
+效果视频见[bilibili demo video](https://www.bilibili.com/video/BV1Yv411p7Js)  
 ![avatar](./githubimage/38.png)
 ![avatar](./githubimage/39.png)
 ![avatar](./githubimage/40.png)
@@ -30,7 +30,7 @@ $ git checkout TomMao-2.0
 $ pip install -r requirements.txt  
 $ python -m pip uninstall wandb  
 ```
-**注意！当前代码不支持wandb, 不卸载大概率训练有bug**  
+**注意！当前代码未支持wandb, 不卸载训练大概率有bug**  
 #### (b) Data Prepare 数据集准备
 当前支持Cityscapes语义分割数据集和实力分割标签生成的目标检测数据集，扩展语义分割数据集需要增改代码，目标检测数据集可以自行替换,参考原版YOLOV5和./data/cityscapes_det.yaml文件  
 **下载数据**：自行到官网下载Cityscapes数据集，把leftImg8bit和gtFine放入./data/citys文件夹中，也可使用citys中的bash脚本下载，需要先把脚本中的帐号密码改成你自己的  
@@ -43,11 +43,12 @@ $ mkdir detdata
 $ mv ./images ./detdata
 $ mv ./labels ./detdata
 ```
-2.0版本准备了4种分割Head的预训练模型，指标差不多，但从可视化上更推荐后BiSe和Lab(感受野更大，且带全局信息)：  
-**Base.pt** 基础版本的分割head。16层(PAN1/8)输入，配置文件通道512。C3，通道略拓宽版本的C3SPP，dropout(0.1)，1×1卷积到类别。速度精度效果不错，但是SPP配1/8图感受野其实不够大，s模型够好了，但m模型加深加宽后提高量不让人满意。  
-**BiSe.pt** 模仿BiSeNetV1的分割头，目前效果最好。16,19,22(PAN的1/8,1/16,1/32)输入，配置文件通道256。1/32图过RFB(以下提到的RFB均是参考RFB和ASPP的魔改模块，相比ASPP多了1×1卷积降通道和垫的3×3卷积，相比RFB缺少shortcut)，ARM，Upsample。1/16图过RFB，ARM，与1/32结果Add。1/8过C3，与add结果通道并联过FFM，3×3卷积refine，1×1卷积到类别。1/32和1/16结果都有一个辅助损失，系数为0.1。与BiSeNet区别在于BiSeNet每个Upsample后有一个3×3卷积refine，这里省计算量砍掉。BiSeNet的辅助损失系数是1，这里是0.1。BiSeNet是相加后处理，这里是处理后相加。另外这里RFB模块有空洞卷积(其中1/32图带全局)。  
-**Lab.pt** 模仿DeepLabV3+的分割头，速度精度均高于Base。16,19(PAN的1/8,1/16)输入，配置文件通道256。1/8图1×1卷积到64通道，1/16图RFB，ARM后上采样与1/8图并联过FFM，3×3卷积,1×1卷积到通道。DeepLabV3+解码器部分用了浅层1/4和深层1/16，这里是1/8和1/16因为YOLO 1/4图通道数太少，并联后不3×3refine会比较破碎，refine则计算量太大。论文提到浅层大分辨率图通道少更利于训练，论文到48(提过64也可以，本项目64)，论文提到VOC用了全局更好，Cityscapes用了全局更差，这里还是用了全局。相比DeepLab这里多了ARM和FFM注意力融合结构，1/16输出接了一个辅助损失。  
-**Add.pt** 16,19,22(PAN的1/8,1/16,1/32)输入，三层分别接一个辅助损失，特征注意力相加后分类。辅助头比较多，比较震荡的一个版本，但效果也很不错。
+2.0版本准备了4种分割Head的预训练模型。Add速度最慢，精度和Base差不多。从可视化上更推荐BiSe和Lab(感受野更大，且带全局信息)，其中Lab精度最高速度也很好：  
+`推荐指数：Lab > BiSe或Base > Add`  
+**Base.pt** 基础版本的分割head。16层(PAN1/8)输入，配置文件通道512。C3，通道略拓宽版本的C3SPP，dropout(0.1)，1×1卷积到类别。速度精度综合效果不错，但是SPP配1/8图感受野其实不够大，s模型够好了，但m模型加深加宽后提高量不让人满意。  
+**BiSe.pt** 模仿BiSeNetV1的分割头，精度和lab差不多，但速度比Base慢得多。4,19,22(浅层1/8,PAN的1/16,1/32)输入，配置文件通道256。1/32图过RFB(以下提到的RFB均是参考RFB和ASPP的魔改模块，相比ASPP多了1×1卷积降通道和垫的3×3卷积，相比RFB缺少shortcut)，ARM，Upsample。1/16图过RFB，ARM，与1/32结果Add。1/8过C3，与add结果通道并联过FFM，3×3卷积refine，1×1卷积到类别。1/32和1/16结果都有一个辅助损失，系数为0.1。与BiSeNet区别在于BiSeNet每个Upsample后有一个3×3卷积refine，这里省计算量砍掉。BiSeNet的辅助损失系数是1，这里是0.1。BiSeNet是相加后处理，这里是处理后相加。另外这里RFB模块有空洞卷积(其中1/32图带全局)。  
+**Lab.pt** 模仿DeepLabV3+的分割头，精度最高，速度仅略低于Base。4,19(浅层1/8,PAN的1/16)输入，配置文件通道256。1/8图1×1卷积到64通道，1/16图RFB，ARM后上采样与1/8图并联过FFM，3×3卷积,1×1卷积到通道。DeepLabV3+解码器部分用了浅层1/4和深层1/16，这里是1/8和1/16因为YOLO 1/4图通道数太少，并联后不3×3refine会比较破碎，refine则计算量太大。论文提到浅层大分辨率图通道少更利于训练，论文到48(提过64也可以，本项目64)，论文提到VOC用了全局更好，Cityscapes用了全局更差，这里还是用了全局。相比DeepLab这里多了ARM和FFM注意力融合结构，1/16输出接了一个辅助损失。  
+**Add.pt** 16,19,22(PAN的1/8,1/16,1/32)输入，三层分别接一个辅助损失，特征注意力相加后分类。辅助头比较多，比较震荡的一个版本，精度不错，速度堪忧。
 ### 1. Inference 推理图片,用连续帧制作视频,向cCityscapes提交
 #### (a) 普通图片推理
 ```bash
@@ -118,7 +119,17 @@ yolov5的模型主架构代码，包括Model类和检测要用的Detect类，我
     
 11. train.py  
    训练流程是每个batch跑一组检测数据backward，然后跑一组分割数据backward，然后accumulate后统一更新参数。每10轮测一次分割精度，最后40轮每轮测，测分割时候才会checkpoint。(之所以这么做是因为loader有点问题导致部分子进程死亡，测分割很慢，我机器上1分钟多点)。另外目前还没写多卡训练的支持，应该是用不了多卡。  
-12. 一些调参经验  
+    时间关系ohem和CE接口没保持一致，循环中CE接口aux不同个数输入求损失处没保持一致，替换分割头训练时候要注释解注释这两个地方。  
+  
+12. 一些设计经验  
+   融合时用cat后1*1包含了add，但并不总是比add好，相比这两者FFM是一个不错的融合方式。  
+    DeepLabV3+的经验值得学习，多层融合时语义层比细节层多更容易拟合。  
+    细节层也最好别只有1×1处理，哪怕1×1砍到48/或64个通道再来个3×3也是好的。  
+    空洞卷积很给力但计算量也很大。  
+    1/32图加aux head和aux loss效果似乎不太好，1/16加aux很不错  
+    yolo的FPN和PAN用的是cat，19 cat包含了4，理论上可以学出来，然而实验表明当做细节层时候直接用第4层比用16层好，语义层(或单输入层)自然是用16,19,22比浅层好，用17,20,23会和检测冲突。   
+          
+13. 一些调参经验  
    输入长边尺寸是1024所以空洞卷积的膨胀率没必要那么大(deeplabv3+原文1/16处6,12,18)，砍半甚至更小绰绰有余，太大速度降得多，精度还没收益。   
     BiSeNet的经验表明分割模型通道没必要那么多，128很够了，但是一些多尺度的中间通道提高有助于精度(SPP，ASPP，RFB等，当然速度的代价也不小，特别是空洞卷积。原ASPP是用空洞卷积降通道维，这里只敢降了通道再空洞卷积，但是用了各分支1×1独立的方式增加复杂度)。  
     batchsize太小对BN不太好，震荡可能要砍学习率  
