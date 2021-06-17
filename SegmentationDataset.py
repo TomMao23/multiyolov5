@@ -2,8 +2,8 @@
 # Created by: Hang Zhang
 # Email: zhang.hang@rutgers.edu
 # Copyright (c) 2017
-# 带标准数据加载增广的语义分割Dataset, Dataset类代码原作者张航, 详见其开发的库 PyTorch-Encoding
-# 稍加修改即可加载BDD100k分割数据
+# 带标准数据加载增广的语义分割Dataset, Dataset类代码原作者张航, 详见其开发的库 PyTorch-Encoding, 在此基础上魔改了一些包括不均匀的长边采样,色彩变换,
+# 稍加修改即可加载BDD100k分割数据, 此处写了
 ###########################################################################
 
 import os
@@ -26,16 +26,16 @@ from random import choices
 def range_and_prob(base_size, low: float = 0.5,  high: float = 3, std: int = 25) -> list:
     low = math.ceil((base_size * low) / 32)
     high = math.ceil((base_size * high) / 32)
-    mean = math.ceil(base_size / 32) # - 2  # 峰值略偏
+    mean = math.ceil(base_size / 32) - 4  # 峰值略偏
     x = list(range(low, high + 1))
     p = stats.norm.pdf(x, mean, std)
+    p = p / p.sum()  # choices权重不用归一化, 归一化用于debug和可视化调参std
     return [x, p]
 
 
 def get_long_size(base_size:int, low: float = 0.5,  high: float = 4, std: int = 40) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
     x, p = range_and_prob(base_size, low, high, std)
-    # pp = p / p.sum() choices权重不用归一化, 归一化用于debug和可视化调参std
-    # plt.plot(x, pp)
+    # plt.plot(x, p)
     # plt.show()
     longsize = choices(population=x, weights=p, k=1)[0] * 32
     return longsize
@@ -104,7 +104,8 @@ class BaseDataset(data.Dataset):
         img = img.crop((x1, y1, x1+outsize, y1+outsize))
         mask = mask.crop((x1, y1, x1+outsize, y1+outsize))
         # final transform
-        return img, self._mask_transform(mask)
+        # return img, self._mask_transform(mask)
+        return img, mask  # 这里改了, 在__getitem__里再调用self._mask_transform(mask)
 
     def _sync_transform(self, img, mask):  # 训练数据增广
         # random mirror
@@ -114,7 +115,7 @@ class BaseDataset(data.Dataset):
         w_crop_size, h_crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = get_long_size(base_size=self.base_size, low=0.5, high=3.5, std=45)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
+        long_size = get_long_size(base_size=self.base_size, low=0.5, high=3, std=20)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -138,19 +139,11 @@ class BaseDataset(data.Dataset):
         img = img.crop((x1, y1, x1+w_crop_size, y1+h_crop_size))
         mask = mask.crop((x1, y1, x1+w_crop_size, y1+h_crop_size))
         # final transform
-        return img, self._mask_transform(mask)
+        # return img, self._mask_transform(mask)
+        return img, mask  # 这里改了, 在__getitem__里再调用self._mask_transform(mask)
 
     def _mask_transform(self, mask):
         return torch.from_numpy(np.array(mask)).long()
-
-# def test_batchify_fn(data):
-#     error_msg = "batch must contain tensors, tuples or lists; found {}"
-#     if isinstance(data[0], (str, torch.Tensor)):
-#         return list(data)
-#     elif isinstance(data[0], (tuple, list)):
-#         data = zip(*data)
-#         return [test_batchify_fn(i) for i in data]
-#     raise TypeError((error_msg.format(type(batch[0]))))
 
 
 class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
@@ -171,7 +164,7 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
         self._classes = np.array([0, 7, 8, 11, 12, 13, 17, 19, 20, 21, 22,
                                   23, 24, 25, 26, 27, 28, 31, 32, 33])
         self._key = np.array([-1, -1, -1, -1, -1, -1,
-                              -1, -1,  0,  1, -1, -1,
+                              -1, -1,  0,  1, -1, -1,   # Cityscapes标注是id(Bdd100k标注是trian_id不需要转换,仅需把255换成-1忽略)
                               2,   3,  4, -1, -1, -1,   # 35类, 训练类共19类, -1不是训练类
                               5,  -1,  6,  7,  8,  9,
                               10, 11, 12, 13, 14, 15,
@@ -186,35 +179,21 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
         index = np.digitize(mask.ravel(), self._mapping, right=True)
         return self._key[index].reshape(mask.shape)
 
-    def _preprocess(self, mask_file):
-        if os.path.exists(mask_file):
-            masks = torch.load(mask_file)
-            return masks
-        masks = []
-        print("Preprocessing mask, this will take a while." + \
-            "But don't worry, it only run once for each split.")
-        tbar = tqdm(self.mask_paths)
-        for fname in tbar:
-            tbar.set_description("Preprocessing masks {}".format(fname))
-            mask = Image.fromarray(self._class_to_index(
-                np.array(Image.open(fname))).astype('int8'))
-            masks.append(mask)
-        torch.save(masks, mask_file)
-        return masks
-
     def __getitem__(self, index):
         img = Image.open(self.images[index]).convert('RGB')
         if self.mode == 'test':
             if self.transform is not None:
                 img = self.transform(img)
             return img, os.path.basename(self.images[index])
-        #mask = self.masks[index]
+        # mask = self.masks[index]
         mask = Image.open(self.mask_paths[index])
         # synchrosized transform
         if self.mode == 'train':
             img, mask = self._sync_transform(img, mask)  # 训练数据增广
+            mask = self._mask_transform(mask)
         elif self.mode == 'val':
             img, mask = self._val_sync_transform(img, mask)  # 验证数据处理
+            mask = self._mask_transform(mask)
         else:
             assert self.mode == 'testval'   # 训练时候验证用val(快, 省显存),测试验证集指标时用testval一般mIoU会更高且更接近真实水平
             # mask = self._mask_transform(mask)  # 测试验证指标, 除转换标签格式外不做任何处理
@@ -229,7 +208,7 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
         return img, mask
 
     def _mask_transform(self, mask):
-        #target = np.array(mask).astype('int32') - 1
+        # target = np.array(mask).astype('int32') - 1
         target = self._class_to_index(np.array(mask).astype('int32'))
         return torch.from_numpy(target).long()
 
@@ -244,21 +223,115 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
         return self._classes[index].reshape(mask.shape)
 
 
+# 混合Cityscapes与BDD100k用这个, 把bdd当做Cityscapes的一个城市, 用jpg和png区分处理, 没写单独BDD的
+class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
+    NUM_CLASS = 19
+
+    # mode训练时候验证用testval, 测试验证集指标时候也用testval, val倍废弃
+    def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
+                 mode=None, transform=None, target_transform=None, **kwargs):
+        super(CityBddSegmentation, self).__init__(
+            root, split, mode, transform, target_transform, **kwargs)
+        # self.root = os.path.join(root, self.BASE_DIR)
+        self.images, self.mask_paths = get_city_pairs(self.root, self.split)
+        assert (len(self.images) == len(self.mask_paths))
+        if len(self.images) == 0:
+            raise RuntimeError("Found 0 images in subfolders of: \
+                " + self.root + "\n")
+        self._indices = np.array(range(-1, 19))
+        self._classes = np.array([0, 7, 8, 11, 12, 13, 17, 19, 20, 21, 22,
+                                  23, 24, 25, 26, 27, 28, 31, 32, 33])
+        self._key = np.array([-1, -1, -1, -1, -1, -1,
+                              -1, -1,  0,  1, -1, -1,   # Cityscapes标注是id(Bdd100k标注是trian_id不需要转换,仅需把255换成-1忽略)
+                              2,   3,  4, -1, -1, -1,   # 35类, 训练类共19类, -1不是训练类
+                              5,  -1,  6,  7,  8,  9,
+                              10, 11, 12, 13, 14, 15,
+                              -1, -1, 16, 17, 18])
+        self._mapping = np.array(range(-1, len(self._key)-1)).astype('int32')
+
+    def _class_to_index(self, mask):
+        # assert the values
+        values = np.unique(mask)
+        for i in range(len(values)):
+            assert(values[i] in self._mapping)
+        index = np.digitize(mask.ravel(), self._mapping, right=True)
+        return self._key[index].reshape(mask.shape)
+
+    def __getitem__(self, index):
+        imagepath = self.images[index]
+        img = Image.open(imagepath).convert('RGB')
+        if self.mode == 'test':
+            if self.transform is not None:
+                img = self.transform(img)
+            return img, os.path.basename(self.images[index])
+        # mask = self.masks[index]
+        mask = Image.open(self.mask_paths[index])
+        # synchrosized transform
+        if self.mode == 'train':
+            img, mask = self._sync_transform(img, mask)  # 训练数据增广
+            if imagepath.endswith('png'):  # Cityscapes png
+                mask = self._mask_transform(mask)
+            else:  # BDD100k jpg
+                mask = torch.from_numpy(np.array(mask)).long()
+                mask[mask==255] = -1
+        elif self.mode == 'val':
+            img, mask = self._val_sync_transform(img, mask)  # 验证数据处理
+            if imagepath.endswith('png'):  # Cityscapes png
+                mask = self._mask_transform(mask)
+            else:  # BDD100k jpg
+                mask = torch.from_numpy(np.array(mask)).long()
+                mask[mask==255] = -1
+        else:
+            assert self.mode == 'testval'   # 训练时候验证用val(快, 省显存),测试验证集指标时用testval一般mIoU会更高且更接近真实水平
+            # mask = self._mask_transform(mask)  # 测试验证指标, 除转换标签格式外不做任何处理
+            img = self._testval_img_transform(img)
+            if imagepath.endswith('png'):  # Cityscapes png
+                mask = self._mask_transform(mask)
+            else:  # BDD100k jpg
+                mask = torch.from_numpy(np.array(mask)).long()
+                mask[mask==255] = -1
+
+        # general resize, normalize and toTensor
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            mask = self.target_transform(mask)
+        return img, mask
+
+    def _mask_transform(self, mask):
+        # target = np.array(mask).astype('int32') - 1
+        target = self._class_to_index(np.array(mask).astype('int32'))
+        return torch.from_numpy(target).long()
+
+    def __len__(self):
+        return len(self.images)
+
+    def make_pred(self, mask):
+        values = np.unique(mask)
+        for i in range(len(values)):
+            assert(values[i] in self._indices)
+        index = np.digitize(mask.ravel(), self._indices, right=True)
+        return self._classes[index].reshape(mask.shape)
+
+
+# 单独Cityscapes和混合Cityscapes与BDD100k都用这个, 把bdd当做Cityscapes的一个城市, 用jpg和png区分处理
 def get_city_pairs(folder, split='train'):
     def get_path_pairs(img_folder, mask_folder):
         img_paths = []
         mask_paths = []
         for root, directories, files in os.walk(img_folder):
             for filename in files:
-                if filename.endswith(".png"):
+                if filename.endswith(".png") or filename.endswith(".jpg"):
                     imgpath = os.path.join(root, filename)
                     foldername = os.path.basename(os.path.dirname(imgpath))
-                    maskname = filename.replace('leftImg8bit','gtFine_labelIds')
+                    maskname = filename.replace('leftImg8bit', 'gtFine_labelIds')
+                    if filename.endswith(".jpg"):  # BDD100k图是jpg，标签是png
+                        maskname =maskname.replace('.jpg', '.png')
                     maskpath = os.path.join(mask_folder, foldername, maskname)
                     if os.path.isfile(imgpath) and os.path.isfile(maskpath):
                         img_paths.append(imgpath)
                         mask_paths.append(maskpath)
-                    else:
+                    else:  # 正常情况Cityscapes和BDD数据文件层面很干净不应该警告
                         print('cannot find the mask or image:', imgpath, maskpath)
         print('Found {} images in the folder {}'.format(len(img_paths), img_folder))
         return img_paths, mask_paths
@@ -307,10 +380,41 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
     return loader
 
 
+def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
+                     base_size=1024, crop_size=(1024, 512),
+                     batch_size=32, workers=4, pin=True):
+    if mode == "train":
+        input_transform = transforms.Compose([
+            transforms.ColorJitter(brightness=0.45, contrast=0.45,
+                                   saturation=0.45, hue=0.15),
+            transforms.ToTensor(),
+            # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
+        ])
+    else:
+        input_transform = transforms.Compose([
+            transforms.ToTensor(),
+            # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
+        ])
+    dataset = CityBddSegmentation(root=root, split=split, mode=mode,
+                               transform=input_transform,
+                               base_size=base_size, crop_size=crop_size)
+
+    loader = data.DataLoader(dataset, batch_size=batch_size,
+                             drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,
+                             num_workers=workers, pin_memory=pin)
+    return loader
+
+
 if __name__ == "__main__":
-    trainloader = get_citys_loader(root='./data/citys/', split="train", mode="train", base_size=1024, crop_size=(1024, 512), workers=4, pin=True, batch_size=4)
+    t = transforms.Compose([  # 用于测试色彩和大小裁剪变换是否合理
+        transforms.ColorJitter(brightness=0.45, contrast=0.45,
+                               saturation=0.45, hue=0.05)])
+    trainloader = get_citysbdd_loader(root='./data/citys/', split="val", mode="train", base_size=1024, crop_size=(832, 416), workers=0, pin=True, batch_size=4)
     import time
     t1 = time.time()
     for i, data in enumerate(trainloader):
         print(f"batch: {i}")
     print(f"cost {(time.time()-t1)/(i+1)} per batch load")
+    pass
+
+    pass
