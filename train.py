@@ -30,7 +30,7 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
     fitness, fitness2, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss, SegmentationLosses, SegFocalLoss
+from utils.loss import ComputeLoss, SegmentationLosses, SegFocalLoss, OhemCELoss, ProbOhemCrossEntropy2d
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
@@ -100,6 +100,8 @@ def train(hyp, opt, device, tb_writer=None):
         check_dataset(data_dict)  # check
     train_path = data_dict['train']
     test_path = data_dict['val']
+    segtrain_path = data_dict['segtrain']
+    segval_path = data_dict['segval']
 
     # Freeze 要冻结的参数 似乎只能在此代码处手动设置列表
     freeze = []  # parameter names to freeze (full or partial)
@@ -223,15 +225,15 @@ def train(hyp, opt, device, tb_writer=None):
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
     # 分割 loader
-        seg_valloader = SegmentationDataset.get_citys_loader(root="data/citys", batch_size=4,
+        seg_valloader = SegmentationDataset.get_citys_loader(root=segval_path, batch_size=4,
                                                          split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
                                                          base_size=1024,   # 对cityscapes, 原图resize到(800, 400)输入后双线性插值到原图尺寸计算精度
                                                          # crop_size=640,  # testval 时候cropsize不起作用
                                                          workers=4, pin=True)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
                                                                      # 我电脑上(4,4)是最快的, 更大子进程会挂(现在图大了,怎么设都会挂, BUG)
-    seg_trainloader = SegmentationDataset.get_citys_loader(root='data/citys',
+    seg_trainloader = SegmentationDataset.get_citys_loader(root=segtrain_path,
                                                            split="train", mode="train",
-                                                           base_size=1024, crop_size=(1024, 512),
+                                                           base_size=1024, crop_size=(832, 416),
                                                            batch_size=batch_size,
                                                            workers=opt.workers, pin=True)
 
@@ -262,7 +264,26 @@ def train(hyp, opt, device, tb_writer=None):
     scheduler.last_epoch = start_epoch - 1  # do not move 配置lr_scheduler起始位置
     scaler = amp.GradScaler(enabled=cuda)  # 说明不是float16训练,而是16和32混合精度训练. 训练前初始化loss scaler 用于float16放大梯度后backward, optimizer.step之前自动转float32再缩回来
     compute_loss = ComputeLoss(model)  # init loss class 初始化检测criteria
-    compute_seg_loss = SegmentationLosses(nclass=19, aux=False, ignore_index=-1).cuda()#SegFocalLoss(ignore_index=-1, gamma=1, reduction="mean").cuda()  # 分割loss,(19仅代表cityscapes) 暂时纯CE loss, 忽略-1的标签, 不支持cpu和多卡gpu训练
+  
+#-----------------------------------------------------------------------------------------------------------
+    # Base用这个，无aux
+    # compute_seg_loss = SegmentationLosses(nclass=19, aux=False, ignore_index=-1).cuda()#SegFocalLoss(ignore_index=-1, gamma=1, reduction="mean").cuda() 
+    # BiSe用这个　两个aux
+    # compute_seg_loss = SegmentationLosses(nclass=19, aux=True, aux_num=2, aux_weight=0.1, ignore_index=-1).cuda()
+    # Lab用这个　一个aux
+    compute_seg_loss = SegmentationLosses(nclass=19, aux=True, aux_num=1, aux_weight=0.1, ignore_index=-1).cuda()
+#-----------------------------------------------------------------------------------------------------------
+
+    # focalloss别用，cityscapes效果不行
+    # OHEM能用，理论上应该超过CE，但是目前实验效果不如CE(设成默认0.7收敛蛮快的但最终值不够好)，认为与计算像素个数和学习率有关，用的话循环损失计算的语句得改一下，接口和CE还没来得及保持一致
+    # compute_seg_loss = OhemCELoss(thresh=0.7, ignore_index=-1, aux=False)
+    # compute_seg_loss = OhemCELoss(thresh=0.7, ignore_index=-1, aux=True, aux_weight=[0.15, 0.1])
+
+    detgain, seggain = 0.65, 0.35  # 检测, 分割比例  
+    # CE、1/8单输入、batchsize13用0.65,0.35左右,注意64向下取整的梯度积累，比13*4=52大(12*5=64)通常应该降低分割损失比例
+
+
+
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
@@ -306,6 +327,8 @@ def train(hyp, opt, device, tb_writer=None):
         for det_batch, seg_batch in zip(pbar, segpbar):  # batch -------------------------------------------------------------
             i, (imgs, targets, paths, _) = det_batch  # 检测
             _, (segimgs, segtargets) = seg_batch   # 分割
+            if len(imgs)==1 or len(segimgs)==1:  # 手动droplast,SE或者gloablpool后的bn不支持单个样本，检测loader调用地方太多不好droplast，这里手动
+                continue
             # warmup等参数变化以检测为准
             ni = i + nb * epoch  # number integrated batches (since train start) 记录总iterations, 可以用于停止warmup
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -329,7 +352,6 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward and Backward 对比原版yolov5此处修改, 否则batchsize只能取单检测时候的一半, 这种写法可以更大一点
 
-            detgain, seggain = 0.65, 0.35  # 检测, 分割比例  0.65,0.35
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size
@@ -341,30 +363,33 @@ def train(hyp, opt, device, tb_writer=None):
             scaler.scale(loss).backward()
             imgshape = imgs.shape[-1]
             if plots and ni >= 3:
-                del imgs
+                del imgs  # 前三个batch画图不能del
             else:
-                imgs = imgs.to(torch.device('cpu'), non_blocking=True)  # 释放 这个non_blocking显存紧张时设为False后续操作等待释放完, 否则后续显存申请可能不够, segimgs输入后就没被调用会被pytorch自动回收不用手动释放(img后续有被调用要手动释放)
+                imgs = imgs.to(torch.device('cpu'), non_blocking=True)  # 释放 segimgs输入后就没被调用会被pytorch自动回收不用手动释放(img后续有被调用要手动释放)
             
             segimgs = segimgs.to(device, non_blocking=True)  # 分割已经做过totensor了, 不用/255
 
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(segimgs)
-                segloss = compute_seg_loss(pred[1], segtargets.to(device)) * batch_size # 分割loss CE是平均loss, 配合检测做梯度积累, 因此乘以batchsize(注意有梯度积累其真实batchsize约是nbs=64)
+#-----------------------------------------------------------------------------------------------------------
+                # Base用这个,无aux
+                # segloss = compute_seg_loss(pred[1], segtargets.to(device)) * batch_size # 分割loss CE是平均loss, 配合检测做梯度积累, 因此乘以batchsize(注意有梯度积累其真实batchsize约是nbs=64)  
+                # Bise用这个,两个aux   
+                # segloss = compute_seg_loss(pred[1][0], pred[1][1], pred[1][2], segtargets.to(device)) * batch_size    
+                # Lab用这个,一个aux   
+                segloss = compute_seg_loss(pred[1][0], pred[1][1], segtargets.to(device)) * batch_size   
+#-----------------------------------------------------------------------------------------------------------                         
                 segloss *= seggain
             scaler.scale(segloss).backward()
             # segimgs = segimgs.to(torch.device('cpu'), non_blocking=False) #释放
             del segimgs
-            # # Backward  # 混合精度训练反传时用scalar自动scale梯度
-            # seggain = 1
-            # mixloss = (loss + seggain*segloss) / 2.0
-            # scaler.scale(mixloss).backward()
 
             # Optimize
             if ni % accumulate == 0:  # 梯度积累accumulate次后才优化,
                 scaler.step(optimizer)  # optimizer.step  # 混合精度训练优化时用scaler
                 scaler.update()
                 optimizer.zero_grad()  # 每次更新完参数才清空梯度, 不更新时累计
-                if ema:  # 不开DDP和DDP主线程中ema开启, 每次更新ema
+                if ema:  # 不开DDP和DDP主进程中ema开启, 每次更新ema
                     ema.update(model)
 
             # Print
@@ -399,7 +424,7 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
             # pixACC, mIoU
-            if epoch % 10 == 0 or (epochs - epoch) < 45:
+            if epoch % 10 == 0 or (epochs - epoch) < 40:
                 mIoU = test.seg_validation(model=ema.ema, valloader=seg_valloader, device=device, n_segcls=19,
                                 half_precision=True)
             # mAP

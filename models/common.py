@@ -16,6 +16,7 @@ from utils.datasets import letterbox
 from utils.general import non_max_suppression, make_divisible, scale_coords, increment_path, xyxy2xywh
 from utils.plots import color_list, plot_one_box
 from utils.torch_utils import time_synchronized
+import torch.nn.functional as F
 
 
 def autopad(k, p=None):  # kernel, padding  # 自动padding,不指定p时自动按kernel大小pading到same
@@ -26,7 +27,7 @@ def autopad(k, p=None):  # kernel, padding  # 自动padding,不指定p时自动�
 
 
 def DWConv(c1, c2, k=1, s=1, act=True):
-    # Depthwise convolution  # 深度可分离卷积, 组数取c1, c2(输入输出通道)最大公因数
+    # Depthwise convolution  # 分组卷积, 组数取c1, c2(输入输出通道)最大公因数
     return Conv(c1, c2, k, s, g=math.gcd(c1, c2), act=act)
 
 
@@ -151,20 +152,6 @@ class C3SPP(nn.Module):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
 
 
-class C3SPPD(nn.Module):  # C3SPP with dropout2d after cat
-    def __init__(self, c1, c2, k=(5, 9, 13, 17), g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
-        super(C3SPPD, self).__init__()
-        c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(2 * c_, c2, 1)  # act=FReLU(c2)
-        self.m = SPP(c_, c_, k=k)
-        self.drop2d = nn.Dropout2d(0.3)
-        # self.m = nn.Sequential(*[CrossConv(c_, c_, 3, 1, g, 1.0, shortcut) for _ in range(n)])
-    def forward(self, x):
-        return self.cv3(self.drop2d(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1)))
-
-
 class C3SPP2(nn.Module):  
     def __init__(self, c1, c2, k=(5, 9, 13), n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super(C3SPP2, self).__init__()
@@ -218,6 +205,203 @@ class SPPM(nn.Module):  # replace Max by Avg
     def forward(self, x):
         x = self.cv1(x)
         return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))
+
+
+class Attention(nn.Module):
+    def __init__(self, chan):
+        super(Attention, self).__init__()
+        self.W =  nn.Sequential(nn.AdaptiveAvgPool2d(1), 
+                               Conv(chan, chan, k=1, s=1, act=False), 
+                               nn.Sigmoid()
+                               )
+    def forward(self, x):
+        return x * self.W(x)
+
+
+class ARM(nn.Module):   # AttentionRefinementModule
+    def __init__(self, in_chan, out_chan, *args, **kwargs):
+        super(ARM, self).__init__()
+        self.conv = Conv(in_chan, out_chan, k=3, s=1, p=None)  #　Conv 自动padding
+        self.channel_attention = nn.Sequential(nn.AdaptiveAvgPool2d(1),  # ARM的SE带bn不带act
+                                               Conv(out_chan, out_chan, k=1, s=1,act=False),   # 注意ARM的SE处用了BN，FFM没用，SE用了BN的模型training时不支持单个样本，对应改了两处，一是yolo.py构造好跑一次改成了(2,3,256,256)
+                                               nn.Sigmoid()                 # 二是train.py的batch开头加了一句单样本时候continue(分割loader容易加droplast，但是检测loader出现地方太多没分mode不好改)
+                                               )            
+
+    def forward(self, x):
+        feat = self.conv(x)  # 先3*3卷积一次
+        atten = self.channel_attention(feat)  # SE
+        return torch.mul(feat, atten)
+            
+
+class FFM(nn.Module):  # FeatureFusionModule  reduction用来控制瓶颈结构
+    def __init__(self, in_chan, out_chan, reduction=1):
+        super(FFM, self).__init__()
+        self.convblk = Conv(in_chan, out_chan, k=1, s=1, p=None)  ## 注意力处用了１＊１瓶颈，两个卷积都不带bn,一个带普通激活，一个sigmoid
+        self.channel_attention = nn.Sequential(nn.AdaptiveAvgPool2d(1),
+                                               nn.Conv2d(out_chan, out_chan//reduction,
+                                                         kernel_size = 1, stride = 1, padding = 0, bias = False),
+                                               nn.SiLU(inplace=True),
+                                               nn.Conv2d(out_chan//reduction, out_chan,
+                                                         kernel_size = 1, stride = 1, padding = 0, bias = False),
+                                               nn.Sigmoid(),
+                                            )
+        
+    def forward(self, fspfcp):  #空间, 语义两个张量用[]包裹送入模块，为了方便Sequential
+        fcat = torch.cat(fspfcp, dim=1)
+        feat = self.convblk(fcat)
+        atten = self.channel_attention(feat)
+        feat_atten = torch.mul(feat, atten)
+        feat_out = feat_atten + feat
+        return feat_out
+
+
+class ASPP(nn.Module):  # ASPP，原版没有hid，为了灵活性方便砍通道增加hid，hid和out一样就是原版
+
+    def __init__(self, in_planes, hid, out_planes, d=[3, 6, 9], has_gloabel=False):
+        super(ASPP, self).__init__()
+        self.has_gloabel = has_gloabel
+
+        self.branch0 = nn.Sequential(
+                Conv(in_planes, hid, k=3, s=1),
+                )
+        self.branch1 = nn.Sequential(
+                nn.Conv2d(in_planes, hid, kernel_size=3, stride=1, padding=d[0], dilation=d[0], bias=False),
+                nn.BatchNorm2d(hid),
+                nn.SiLU()    
+                )
+        self.branch2 = nn.Sequential(
+                nn.Conv2d(in_planes, hid, kernel_size=3, stride=1, padding=d[1], dilation=d[1], bias=False),
+                nn.BatchNorm2d(hid),
+                nn.SiLU()                    
+                )
+        self.branch3 = nn.Sequential(
+                nn.Conv2d(in_planes, hid, kernel_size=3, stride=1, padding=d[2], dilation=d[2], bias=False),
+                nn.BatchNorm2d(hid),
+                nn.SiLU()    
+                )
+        if self.has_gloabel:
+            self.branch4 = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                Conv(in_planes, hid, k=1),
+                )
+        self.ConvLinear = Conv(int(5*hid) if has_gloabel else int(4*hid), out_planes, k=1, s=1)
+
+    def forward(self, x):
+        x0 = self.branch0(x)
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x3 = self.branch3(x)
+        if not self.has_gloabel:
+            out = self.ConvLinear(torch.cat([x0,x1,x2,x3],1))
+            return out
+        else:
+            x4 = F.interpolate(self.branch4(x), (x.shape[2], x.shape[3]), mode='nearest')  # 全局
+            out = self.ConvLinear(torch.cat([x0,x1,x2,x3,x4],1))
+            return out
+
+
+class RFB(nn.Module):  # 魔改ASPP和RFB,这个模块其实长得更像ASPP
+    def __init__(self, in_planes, out_planes, map_reduce=4, d=[3, 6, 9], has_gloabel=False):
+        super(RFB, self).__init__()
+        self.out_channels = out_planes
+        self.has_gloabel = has_gloabel
+        inter_planes = in_planes // map_reduce
+
+        self.branch0 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                Conv(inter_planes, inter_planes, k=3, s=1)
+                )
+        self.branch1 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                Conv(inter_planes, inter_planes, k=3, s=1),
+                nn.Conv2d(inter_planes, inter_planes, kernel_size=3, stride=1, padding=d[0], dilation=d[0], bias=False),
+                nn.BatchNorm2d(inter_planes),
+                nn.SiLU()    
+                )
+        self.branch2 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                Conv(inter_planes, inter_planes, k=3, s=1),
+                nn.Conv2d(inter_planes, inter_planes, kernel_size=3, stride=1, padding=d[1], dilation=d[1], bias=False),
+                nn.BatchNorm2d(inter_planes),
+                nn.SiLU()                    
+                )
+        self.branch3 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                Conv(inter_planes, inter_planes, k=3, s=1),
+                nn.Conv2d(inter_planes, inter_planes, kernel_size=3, stride=1, padding=d[2], dilation=d[2], bias=False),
+                nn.BatchNorm2d(inter_planes),
+                nn.SiLU()    
+                )
+        if self.has_gloabel:
+            self.branch4 = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                Conv(in_planes, inter_planes, k=1),
+                )
+        self.Fusion = Conv(int(5*inter_planes) if has_gloabel else int(4*inter_planes), out_planes, k=1, s=1)
+
+    def forward(self, x):
+        x0 = self.branch0(x)
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x3 = self.branch3(x)
+        if not self.has_gloabel:
+            out = self.Fusion(torch.cat([x0,x1,x2,x3], 1))
+            return out
+        else:
+            x4 = F.interpolate(self.branch4(x), (x.shape[2], x.shape[3]), mode='nearest')  # 全局
+            out = self.Fusion(torch.cat([x0,x1,x2,x3,x4],1))
+            return out
+
+
+
+class RFB2(nn.Module):  # 删去了空洞卷积前的３*3
+    def __init__(self, in_planes, out_planes, map_reduce=4, d=[3, 6, 9], has_gloabel=False):
+        super(RFB2, self).__init__()
+        self.out_channels = out_planes
+        self.has_gloabel = has_gloabel
+        inter_planes = in_planes // map_reduce
+
+        self.branch0 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                Conv(inter_planes, inter_planes, k=3, s=1)
+                )
+        self.branch1 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                nn.Conv2d(inter_planes, inter_planes, kernel_size=3, stride=1, padding=d[0], dilation=d[0], bias=False),
+                nn.BatchNorm2d(inter_planes),
+                nn.SiLU()    
+                )
+        self.branch2 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                nn.Conv2d(inter_planes, inter_planes, kernel_size=3, stride=1, padding=d[1], dilation=d[1], bias=False),
+                nn.BatchNorm2d(inter_planes),
+                nn.SiLU()                    
+                )
+        self.branch3 = nn.Sequential(
+                Conv(in_planes, inter_planes, k=1, s=1),
+                nn.Conv2d(inter_planes, inter_planes, kernel_size=3, stride=1, padding=d[2], dilation=d[2], bias=False),
+                nn.BatchNorm2d(inter_planes),
+                nn.SiLU()    
+                )
+        if self.has_gloabel:
+            self.branch4 = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                Conv(in_planes, inter_planes, k=1),
+                )
+        self.ConvLinear = Conv(int(5*inter_planes) if has_gloabel else int(4*inter_planes), out_planes, k=1, s=1)
+
+    def forward(self, x):
+        x0 = self.branch0(x)
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x3 = self.branch3(x)
+        if not self.has_gloabel:
+            out = self.ConvLinear(torch.cat([x0,x1,x2,x3],1))
+            return out
+        else:
+            x4 = F.interpolate(self.branch4(x), (x.shape[2], x.shape[3]), mode='nearest')  # 全局
+            out = self.ConvLinear(torch.cat([x0,x1,x2,x3,x4],1))
+            return out
 
 
 class Focus(nn.Module):  # 卷积复杂度O(W*H*C_in*C_out)此操作使WH减半,后续C_in翻4倍, 把宽高信息整合到通道维度上,

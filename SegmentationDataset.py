@@ -44,7 +44,7 @@ def get_long_size(base_size:int, low: float = 0.5,  high: float = 4, std: int = 
 # 基础语义分割类, 各数据集可以继承此类实现
 class BaseDataset(data.Dataset):
     def __init__(self, root, split, mode=None, transform=None,
-                 target_transform=None, base_size=520, crop_size=480):
+                 target_transform=None, base_size=520, crop_size=480, low=0.6, high=3, sample_std=25):
         self.root = root
         self.transform = transform
         self.target_transform = target_transform
@@ -52,6 +52,9 @@ class BaseDataset(data.Dataset):
         self.mode = mode if mode is not None else split
         self.base_size = base_size
         self.crop_size = crop_size
+        self.low = low
+        self.high = high
+        self.sample_std = sample_std
         if self.mode == 'train':
             print('BaseDataset: base_size {}, crop_size {}'. \
                 format(base_size, crop_size))
@@ -85,7 +88,7 @@ class BaseDataset(data.Dataset):
         img = img.resize((ow, oh), Image.BILINEAR)
         return img
 
-    def _val_sync_transform(self, img, mask):  # 训练中验证数据处理: 把图短边resize成crop_size, 长边保持比例, 再crop一块用于验证
+    def _val_sync_transform(self, img, mask):  # 训练中验证数据处理: 把图短边resize成crop_size, 长边保持比例, 再crop一块用于验证(已废除)
         outsize = self.crop_size
         short_size = outsize
         w, h = img.size
@@ -115,7 +118,7 @@ class BaseDataset(data.Dataset):
         w_crop_size, h_crop_size = self.crop_size
         # random scale (short edge)  从base_size一半到两倍间随机取数, 图resize长边为此数, 短边保持比例
         w, h = img.size
-        long_size = get_long_size(base_size=self.base_size, low=0.5, high=3, std=20)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
+        long_size = get_long_size(base_size=self.base_size, low=self.low, high=self.high, std=self.sample_std)  # random.randint(int(self.base_size*0.5), int(self.base_size*2))
         if h > w:
             oh = long_size
             ow = int(1.0 * w * long_size / h + 0.5)
@@ -131,7 +134,7 @@ class BaseDataset(data.Dataset):
             padh = h_crop_size - oh if oh < h_crop_size else 0
             padw = w_crop_size - ow if ow < w_crop_size else 0
             img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
-            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=0)  # 为什么mask可以填0:类别0不是训练类别,后续会被填-1(bdd100k也适用)
+            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=255)  # mask不填充0:类别0不是训练类别,后续会被填-1(但bdd100k数据格式是trainid)
         # random crop 随机按crop_size从resize和pad的图上crop一块用于训练
         w, h = img.size
         x1 = random.randint(0, w - w_crop_size)
@@ -151,9 +154,9 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
 
     # mode训练时候验证用val, 测试验证集指标时候用testval一般会更高且更接近真实水平
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
-                 mode=None, transform=None, target_transform=None, **kwargs):
+                 mode=None, transform=None, target_transform=None, low=0.6, high=3, sample_std=25, **kwargs):
         super(CitySegmentation, self).__init__(
-            root, split, mode, transform, target_transform, **kwargs)
+            root, split, mode, transform, target_transform, low=0.6, high=3, sample_std=25, **kwargs)
         # self.root = os.path.join(root, self.BASE_DIR)
         self.images, self.mask_paths = get_city_pairs(self.root, self.split)
         assert (len(self.images) == len(self.mask_paths))
@@ -161,7 +164,7 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
             raise RuntimeError("Found 0 images in subfolders of: \
                 " + self.root + "\n")
         self._indices = np.array(range(-1, 19))
-        self._classes = np.array([0, 7, 8, 11, 12, 13, 17, 19, 20, 21, 22,
+        self._classes = np.array([0, 7, 8, 11, 12, 13, 17, 19, 20, 21, 22,  # 这个不用管,用于测试集提交转标签的
                                   23, 24, 25, 26, 27, 28, 31, 32, 33])
         self._key = np.array([-1, -1, -1, -1, -1, -1,
                               -1, -1,  0,  1, -1, -1,   # Cityscapes标注是id(Bdd100k标注是trian_id不需要转换,仅需把255换成-1忽略)
@@ -173,6 +176,7 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
 
     def _class_to_index(self, mask):
         # assert the values
+        mask[mask==255] = 0  # pad的255填充成0(id),　下面转trainid变成-1
         values = np.unique(mask)
         for i in range(len(values)):
             assert(values[i] in self._mapping)
@@ -229,9 +233,9 @@ class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
 
     # mode训练时候验证用testval, 测试验证集指标时候也用testval, val倍废弃
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
-                 mode=None, transform=None, target_transform=None, **kwargs):
+                 mode=None, transform=None, target_transform=None, low=0.6, high=2, sample_std=35, **kwargs):
         super(CityBddSegmentation, self).__init__(
-            root, split, mode, transform, target_transform, **kwargs)
+            root, split, mode, transform, target_transform, low=0.6, high=2, sample_std=35, **kwargs)
         # self.root = os.path.join(root, self.BASE_DIR)
         self.images, self.mask_paths = get_city_pairs(self.root, self.split)
         assert (len(self.images) == len(self.mask_paths))
@@ -239,7 +243,7 @@ class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
             raise RuntimeError("Found 0 images in subfolders of: \
                 " + self.root + "\n")
         self._indices = np.array(range(-1, 19))
-        self._classes = np.array([0, 7, 8, 11, 12, 13, 17, 19, 20, 21, 22,
+        self._classes = np.array([0, 7, 8, 11, 12, 13, 17, 19, 20, 21, 22,  #　这个不用管,用于测试集提交转标签的
                                   23, 24, 25, 26, 27, 28, 31, 32, 33])
         self._key = np.array([-1, -1, -1, -1, -1, -1,
                               -1, -1,  0,  1, -1, -1,   # Cityscapes标注是id(Bdd100k标注是trian_id不需要转换,仅需把255换成-1忽略)
@@ -251,6 +255,7 @@ class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
 
     def _class_to_index(self, mask):
         # assert the values
+        mask[mask==255] = 0  # pad的255填充转成0(id),　下面转trainid变成-1
         values = np.unique(mask)
         for i in range(len(values)):
             assert(values[i] in self._mapping)
@@ -269,16 +274,16 @@ class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
         # synchrosized transform
         if self.mode == 'train':
             img, mask = self._sync_transform(img, mask)  # 训练数据增广
-            if imagepath.endswith('png'):  # Cityscapes png
+            if imagepath.endswith('png'):  # Cityscapes png　id转trian_id
                 mask = self._mask_transform(mask)
-            else:  # BDD100k jpg
+            else:  # BDD100k jpg 只用把pad和原本忽略类的255替换成-1
                 mask = torch.from_numpy(np.array(mask)).long()
                 mask[mask==255] = -1
         elif self.mode == 'val':
             img, mask = self._val_sync_transform(img, mask)  # 验证数据处理
-            if imagepath.endswith('png'):  # Cityscapes png
+            if imagepath.endswith('png'):  # Cityscapes png　id转trian_id
                 mask = self._mask_transform(mask)
-            else:  # BDD100k jpg
+            else:  # BDD100k jpg 只用把pad和原本忽略类的255替换成-1
                 mask = torch.from_numpy(np.array(mask)).long()
                 mask[mask==255] = -1
         else:
@@ -361,7 +366,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
     if mode == "train":
         input_transform = transforms.Compose([
             transforms.ColorJitter(brightness=0.45, contrast=0.45,
-                                   saturation=0.45, hue=0.15),
+                                   saturation=0.45, hue=0.1),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
@@ -372,7 +377,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
         ])
     dataset = CitySegmentation(root=root, split=split, mode=mode,
                                transform=input_transform,
-                               base_size=base_size, crop_size=crop_size)
+                               base_size=base_size, crop_size=crop_size, low=0.6, high=3, sample_std=25)
 
     loader = data.DataLoader(dataset, batch_size=batch_size,
                              drop_last=  False, shuffle=True if mode == "train" else False,
@@ -386,7 +391,7 @@ def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", m
     if mode == "train":
         input_transform = transforms.Compose([
             transforms.ColorJitter(brightness=0.45, contrast=0.45,
-                                   saturation=0.45, hue=0.15),
+                                   saturation=0.45, hue=0.1),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
@@ -397,7 +402,7 @@ def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", m
         ])
     dataset = CityBddSegmentation(root=root, split=split, mode=mode,
                                transform=input_transform,
-                               base_size=base_size, crop_size=crop_size)
+                               base_size=base_size, crop_size=crop_size, low=0.6, high=2, sample_std=35)
 
     loader = data.DataLoader(dataset, batch_size=batch_size,
                              drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,

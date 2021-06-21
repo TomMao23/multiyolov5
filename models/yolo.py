@@ -23,13 +23,113 @@ except ImportError:
     thop = None
 
 
-class SegMask(nn.Module):  # 语义分割头, 计划放于PAN后, 输入特征图同Detect (第一版:仅用PAN的1/8处, 但与detect分开处理, 即一个C3, 一个Conv调整成类别通道, 一个8倍上采样)
+# 模仿bisenet但upsample的refine改成up前(bise upsample后有3*3卷积)
+# bisenetv1是一层3*3降到64(辅助128)这里同，辅助损失系数bisenet两个1，这里是两个0.1
+class SegMaskBiSe(nn.Module):  # 三层注意力，两层相加，一层并联FFM  配置文件输入[16, 19, 22]通道写256（即ｓ模型128）
+    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数(接口保留了,没有使用)
+        super(SegMaskBiSe, self).__init__()
+        self.c_in8 = ch[0]  # 4 YOLO的FPN是cat不是add，16cat了完整的4，理论上可以学出来，然而直接用４效果更好(同cat后1*1包含了add却经常没add好一样，问题在正则而不是容量),新配置选择4输入
+        self.c_in16 = ch[1]  # 19
+        self.c_in32 = ch[2]  # 22
+        self.c_out = n_segcls
+
+        self.m8 = nn.Sequential(  # 未完全采用双流结构，从第3层1/8图输入，yolo 16层的1/8图偏语义了
+                               Conv(self.c_in8, 128, k=3, s=1), 
+                               )
+        self.m16 = nn.Sequential(
+                               RFB(self.c_in16, 128, map_reduce=5, d=[3,5,7], has_gloabel=False),
+                               #ARM(128, 128), 实验没看出ARM的明显作用，FFM到是不错
+                               #Conv(128, 128, k=3),
+                               )
+        self.m32 = nn.Sequential(                                     # 对应deeplab 1/16处的6,12,18,此处1/32减半更多
+                               RFB(self.c_in32, 128, map_reduce=8, d=[3,5,7], has_gloabel=True),  # 舍弃原GP，在1/32处加全局
+                               #ARM(128, 128),
+                               #Conv(128, 128, k=3),
+                               )
+        # self.GP = nn.Sequential(
+        #                        nn.AdaptiveAvgPool2d(1),
+        #                        Conv(self.c_in32, 128, k=1),
+        # )
+        self.up16 = nn.Sequential(
+                               Conv(128, 128, 3),  # refine论文源码每次up后一个3*3refine，降低计算量放在前，特征融合后至少1个conv最好是k=3
+                               nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+        )
+        self.up32 = nn.Sequential(
+                               Conv(128, 128, 3),  # refine
+                               nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+        )
+        self.out = nn.Sequential(
+                               FFM(256, 256),
+                               Conv(256, 256, 3),  # 主256到64，辅助128到128
+                               nn.Dropout(0.1),
+                               nn.Conv2d(256, self.c_out, kernel_size=1),
+                               nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
+        )
+        # 辅助分割头，训练用，推理丢弃
+        self.aux16 = nn.Sequential(
+                               Conv(128, 128, 3),
+                               nn.Conv2d(128, self.c_out, kernel_size=1),
+                               nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
+        )
+        self.aux32 = nn.Sequential(
+                               Conv(128, 128, 3),
+                               nn.Conv2d(128, self.c_out, kernel_size=1),
+                               nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True),
+        )
+
+    def forward(self, x):
+        # GP = self.GP(x[2])  # 改成直接用广播机制加 F.interpolate(self.GP(x[2]), (x[2].shape[2], x[2].shape[3]), mode='nearest')  # 全局
+        feat3 = self.up32(self.m32(x[2]))  # + GP) 
+        feat2 = self.up16(self.m16(x[1]) + feat3)
+        feat1 = [self.m8(x[0]), feat2]
+        return self.out(feat1) if not self.training else [self.out(feat1), self.aux16(feat2), self.aux32(feat3)]
+
+
+# 这个头虽然GFLOPS高，但是延时只是略高于segmaskbase模型(2080ti上base 6.8到6.9ms，这个配置的lab ７.1ms，可以砍到6.9到7ms，精度只是略降)
+# 模仿DeepLabV3+(1/4和1/16)　但是YOLO的1/4图通道太少(只有64,deeplab的backbone常有256以上所以1*1降维),这里取1/8和1/16
+# 融合部分加了FFM,最后一层3*3降到64，deeplabv3+是两层3*3保持256通道,bisenetv1是一层3*3降到64(辅助128)
+# deeplabv3+论文经验是编码器解码器结构中，解码部分使用更少的浅层通道利于训练(论文48，32或64也接近，论文提了VOC当中用全局后提升，citys用全局后下降，这里遵循不用全局)
+class SegMaskLab(nn.Module):  #   配置文件[16, 19], 通道配置无效
+    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数(接口保留了,没有使用)
+        super(SegMaskLab, self).__init__()
+        self.c_in8 = ch[0]  #４ YOLO的FPN是cat不是add，16cat了完整的4，理论上可以学出来，然而直接用４效果好于16(同cat后1*1包含了add却并不一定比add好，问题在正则而不是容量)。
+        self.c_in16 = ch[1]  #19
+        self.c_out = n_segcls
+        # 实验效果细节层４和３近似>16, 使用1/16，没像deeplab原文一样直接用1/4
+        self.m8 = nn.Sequential(Conv(self.c_in8, 64, k=1),
+                                #Conv(64, 64, k=3),
+                               )
+        self.m16 = nn.Sequential(  # 组合是先3*3配ASPP，或用RFB前后可选一个3*3，两种组合速度相近，ARM不见得优于普通3*3
+                               # Conv(self.c_in16, self.c_in16, k=1),
+                               # RFB(self.c_in16, 256, map_reduce=4, d=[3, 6, 9], has_gloabel=True),  # 1024输入就是半分辨率，369(deeplab为6,12,18)够了(而且RFB比ASPP多垫了一层3*3)
+                               # 同样hid砍得越少精度越高(这里问题在容量)，//1相当于标准ASPP，2080ti上//4时0.71ms,按照注释
+                               ASPP(self.c_in16, self.c_in16//4, 256, d=[3, 6, 9], has_gloabel=True), # 精度确实高，但是ASPP太重了，砍通道
+                               nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+                               )
+        self.out = nn.Sequential(
+                               FFM(256+64, 256),
+                               Conv(256, 256, 3),
+                               nn.Dropout(0.1),
+                               nn.Conv2d(256, self.c_out, kernel_size=1),
+                               nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
+        )
+        self.aux16 = nn.Sequential(
+                               Conv(self.c_in16, 256, 3),  
+                               nn.Dropout(0.1), 
+                               nn.Conv2d(256, self.c_out, kernel_size=1),
+                               nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True),
+        )
+    def forward(self, x):
+        feat16 = self.m16(x[1])
+        feat8 = self.m8(x[0])
+        return self.out([feat8, feat16]) if not self.training else [self.out([feat8, feat16]), self.aux16(x[1])]  # yolo的neck太复杂,辅助损失位置不好选,选择放在ASPP前
+
+
+# 一个性能不错的分割头140+FPS，验证集72.7~73.0,把1.5改成1.0则是72.4到72.7
+# SPP增大了感受野，也提高了感受野灵活性但还不够(我认为比起ASPP等的差距是本backbone和指标体现不出的,在数据集外的图上可视化能体现)，1/8比较大，SPP比较小，没有更大感受野
+class SegMaskBase(nn.Module):
     def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数
-        super(SegMask, self).__init__()
-    # C3　drop 1*1         　 71.4
-    # C3 + SPP drop 1*1     72.4  
-    # C3 + C3SPP drop 1*1    72.7   7.1 ms  (C3SPP比SPP略快0.3ms,通道下降了)
-    # C3 + C3SPP drop2d 1*1 drop 1*1
+        super(SegMaskBase, self).__init__()
         self.c_in = ch[0]  # 此版本Head暂时只有一层输入
         self.c_out = n_segcls
         self.m = nn.Sequential(C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
@@ -124,7 +224,7 @@ class Model(nn.Module):  # 核心模型
         m = self.model[-1]  # Detect()  Detect头
         if isinstance(m, Detect):
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))[0]])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(2, ch, s, s))[0]])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
             self.stride = m.stride
@@ -270,7 +370,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])  # 检测层, 把来源下标列表f中的层输出通道数加入args中, 用于构建Detect的卷积输入通道数
             if isinstance(args[1], int):  # number of anchors 一般跑不进这句, args[1]是anchors在配置文件中已用列表写好, 非int
                 args[1] = [list(range(args[1] * 2))] * len(f)
-        elif m is SegMask:  # 语义分割头
+        elif m in [SegMaskBiSe, SegMaskLab, SegMaskBase]:  # 语义分割头
             args[1] = max(round(args[1] * gd), 1) if args[1] > 1 else args[1]  # SegMask 中 C3 的n
             args[2] = make_divisible(args[2] * gw, 8)  # SegMask C3 的输出通道数
             args.append([ch[x] for x in f])
@@ -307,6 +407,8 @@ if __name__ == '__main__':
     # Create model
     model = Model(opt.cfg).to(device)
     model.train()
+  #  model.eval()
+    pass
     # a = torch.randn((1, 3, 1024, 2048), device=device)
     # model(a)
     # Profile

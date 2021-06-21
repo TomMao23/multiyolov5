@@ -117,7 +117,7 @@ def detect(save_img=False):
                                 # 算法速度不仅与复杂度有关,也与输入规模相关,因此要求后续输入同尺寸,原版仅在视频测试时开启,想测真实速度应该开启
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     else:
-        cudnn.benchmark = True
+        cudnn.benchmark = False
         dataset = LoadImages(source, img_size=imgsz, stride=stride)  # 跑的是这个
 
     # Get names and colors
@@ -184,6 +184,7 @@ def detect(save_img=False):
 
             # Print time (inference + NMS)
             print(f'{s}Done. ({t2 - t1:.5f}s)')
+            # seg = seg[0]
             seg = F.interpolate(seg, (im0.shape[0], im0.shape[1]), mode='bilinear', align_corners=True)[0]
 
             mask = label2image(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_COLOMAP)[:, :, ::-1]

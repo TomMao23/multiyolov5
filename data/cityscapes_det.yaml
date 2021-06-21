@@ -12,7 +12,9 @@
 # train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
 train: ./data/citys/detdata/images/train/  # 128 images
 val: ./data/citys/detdata/images/val/  # 128 images
-
+# 分割数据集路径，分割类别个数定义在model配置里
+segtrain: ./data/citys
+segval: ./data/citys
 # number of detection classes
 nc: 10
 
