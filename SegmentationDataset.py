@@ -44,7 +44,7 @@ def get_long_size(base_size:int, low: float = 0.5,  high: float = 4, std: int = 
 # 基础语义分割类, 各数据集可以继承此类实现
 class BaseDataset(data.Dataset):
     def __init__(self, root, split, mode=None, transform=None,
-                 target_transform=None, base_size=520, crop_size=480, low=0.6, high=3, sample_std=25):
+                 target_transform=None, base_size=520, crop_size=480, low=0.6, high=3.0, sample_std=25):
         self.root = root
         self.transform = transform
         self.target_transform = target_transform
@@ -134,7 +134,7 @@ class BaseDataset(data.Dataset):
             padh = h_crop_size - oh if oh < h_crop_size else 0
             padw = w_crop_size - ow if ow < w_crop_size else 0
             img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
-            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=255)  # mask不填充0:类别0不是训练类别,后续会被填-1(但bdd100k数据格式是trainid)
+            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=255)  # mask不填充0而是填255:类别0不是训练类别,后续会被填-1(但bdd100k数据格式是trainid)
         # random crop 随机按crop_size从resize和pad的图上crop一块用于训练
         w, h = img.size
         x1 = random.randint(0, w - w_crop_size)
@@ -154,7 +154,7 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
 
     # mode训练时候验证用val, 测试验证集指标时候用testval一般会更高且更接近真实水平
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
-                 mode=None, transform=None, target_transform=None, low=0.6, high=3, sample_std=25, **kwargs):
+                 mode=None, transform=None, target_transform=None, low=0.6, high=3.0, sample_std=25, **kwargs):
         super(CitySegmentation, self).__init__(
             root, split, mode, transform, target_transform, low=0.6, high=3, sample_std=25, **kwargs)
         # self.root = os.path.join(root, self.BASE_DIR)
@@ -229,11 +229,9 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
 
 # 混合Cityscapes与BDD100k用这个, 把bdd当做Cityscapes的一个城市, 用jpg和png区分处理, 没写单独BDD的
 class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
-    NUM_CLASS = 19
-
     # mode训练时候验证用testval, 测试验证集指标时候也用testval, val倍废弃
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
-                 mode=None, transform=None, target_transform=None, low=0.6, high=2, sample_std=35, **kwargs):
+                 mode=None, transform=None, target_transform=None, low=0.6, high=2.0, sample_std=35, NUM_CLASS=19, **kwargs):
         super(CityBddSegmentation, self).__init__(
             root, split, mode, transform, target_transform, low=0.6, high=2, sample_std=35, **kwargs)
         # self.root = os.path.join(root, self.BASE_DIR)
@@ -242,6 +240,8 @@ class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
         if len(self.images) == 0:
             raise RuntimeError("Found 0 images in subfolders of: \
                 " + self.root + "\n")
+        self.NUM_CLASS = NUM_CLASS
+
         self._indices = np.array(range(-1, 19))
         self._classes = np.array([0, 7, 8, 11, 12, 13, 17, 19, 20, 21, 22,  #　这个不用管,用于测试集提交转标签的
                                   23, 24, 25, 26, 27, 28, 31, 32, 33])
@@ -319,6 +319,55 @@ class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
         return self._classes[index].reshape(mask.shape)
 
 
+class CustomSegmentation(BaseDataset):  # base_size 2048 crop_size 768
+    # mode训练时候验证用testval, 测试验证集指标时候也用testval, val倍废弃
+    def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
+                 mode=None, transform=None, target_transform=None, low=0.6, high=2.0, sample_std=35, **kwargs):
+        super(CustomSegmentation, self).__init__(
+            root, split, mode, transform, target_transform, low=0.6, high=2, sample_std=35, **kwargs)
+        # self.root = os.path.join(root, self.BASE_DIR)
+        self.images, self.mask_paths = get_custom_pairs(self.root, self.split)
+        assert (len(self.images) == len(self.mask_paths))
+        if len(self.images) == 0:
+            raise RuntimeError("Found 0 images in subfolders of: \
+                " + self.root + "\n")
+
+    def __getitem__(self, index):
+        imagepath = self.images[index]
+        img = Image.open(imagepath).convert('RGB')
+        if self.mode == 'test':
+            if self.transform is not None:
+                img = self.transform(img)
+            return img, os.path.basename(self.images[index])
+        # mask = self.masks[index]
+        mask = Image.open(self.mask_paths[index])
+        # synchrosized transform
+        if self.mode == 'train':
+            img, mask = self._sync_transform(img, mask)  # 训练数据增广
+            mask = torch.from_numpy(np.array(mask)).long()
+            mask[mask==255] = -1
+        elif self.mode == 'val':
+            img, mask = self._val_sync_transform(img, mask)  # 验证数据处理
+            mask = torch.from_numpy(np.array(mask)).long()
+            mask[mask==255] = -1
+        else:
+            assert self.mode == 'testval'   # 训练时候验证用val(快, 省显存),测试验证集指标时用testval一般mIoU会更高且更接近真实水平
+            # mask = self._mask_transform(mask)  # 测试验证指标, 除转换标签格式外不做任何处理
+            img = self._testval_img_transform(img)
+            mask = torch.from_numpy(np.array(mask)).long()
+            mask[mask==255] = -1
+
+        # general resize, normalize and toTensor
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            mask = self.target_transform(mask)
+        return img, mask
+
+    def __len__(self):
+        return len(self.images)
+
+
 # 单独Cityscapes和混合Cityscapes与BDD100k都用这个, 把bdd当做Cityscapes的一个城市, 用jpg和png区分处理
 def get_city_pairs(folder, split='train'):
     def get_path_pairs(img_folder, mask_folder):
@@ -344,6 +393,47 @@ def get_city_pairs(folder, split='train'):
     if split == 'train' or split == 'val' or split == 'test':
         img_folder = os.path.join(folder, 'leftImg8bit/' + split)
         mask_folder = os.path.join(folder, 'gtFine/'+ split)
+        img_paths, mask_paths = get_path_pairs(img_folder, mask_folder)
+        return img_paths, mask_paths
+    else:
+        assert split == 'trainval'
+        print('trainval set')
+        train_img_folder = os.path.join(folder, 'leftImg8bit/train')
+        train_mask_folder = os.path.join(folder, 'gtFine/train')
+        val_img_folder = os.path.join(folder, 'leftImg8bit/val')
+        val_mask_folder = os.path.join(folder, 'gtFine/val')
+        train_img_paths, train_mask_paths = get_path_pairs(train_img_folder, train_mask_folder)
+        val_img_paths, val_mask_paths = get_path_pairs(val_img_folder, val_mask_folder)
+        img_paths = train_img_paths + val_img_paths
+        mask_paths = train_mask_paths + val_mask_paths
+    return img_paths, mask_paths
+
+
+def get_custom_pairs(folder, split='train'):
+    def get_path_pairs(img_folder, mask_folder):
+        img_paths = []
+        mask_paths = []
+        for root, directories, files in os.walk(img_folder):
+            for filename in files:
+                if filename.endswith(".png") or filename.endswith(".jpg"):
+                    imgpath = os.path.join(root, filename)
+                    # foldername = os.path.basename(os.path.dirname(imgpath)) #customdata不用像cityscapes一样包装一个城市名字了
+                    maskname = filename.replace('segimages', 'seglabels')
+                    if filename.endswith(".jpg"):  # 图可以是jpg，但是标签必须是png
+                        maskname =maskname.replace('.jpg', '.png')
+                    # maskpath = os.path.join(mask_folder, foldername, maskname)
+                    maskpath = os.path.join(mask_folder, maskname)
+                    if os.path.isfile(imgpath) and os.path.isfile(maskpath):
+                        img_paths.append(imgpath)
+                        mask_paths.append(maskpath)
+                    else:  # 正常情况Cityscapes和BDD数据文件层面很干净不应该警告
+                        print('cannot find the mask or image:', imgpath, maskpath)
+        print('Found {} images in the folder {}'.format(len(img_paths), img_folder))
+        return img_paths, mask_paths
+
+    if split == 'train' or split == 'val' or split == 'test':
+        img_folder = os.path.join(folder, 'segimages/' + split)
+        mask_folder = os.path.join(folder, 'seglabels/'+ split)
         img_paths, mask_paths = get_path_pairs(img_folder, mask_folder)
         return img_paths, mask_paths
     else:
@@ -402,7 +492,32 @@ def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", m
         ])
     dataset = CityBddSegmentation(root=root, split=split, mode=mode,
                                transform=input_transform,
-                               base_size=base_size, crop_size=crop_size, low=0.6, high=2, sample_std=35)
+                               base_size=base_size, crop_size=crop_size, low=0.6, high=1.5, sample_std=35)
+
+    loader = data.DataLoader(dataset, batch_size=batch_size,
+                             drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,
+                             num_workers=workers, pin_memory=pin)
+    return loader
+
+
+def get_custom_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
+                     base_size=1024,  # crop_size=(1024, 1024), 注意 Custom的corpsize=basesize
+                     batch_size=32, workers=4, pin=True):
+    if mode == "train":
+        input_transform = transforms.Compose([
+            transforms.ColorJitter(brightness=0.45, contrast=0.45,
+                                   saturation=0.45, hue=0.1),
+            transforms.ToTensor(),
+            # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
+        ])
+    else:
+        input_transform = transforms.Compose([
+            transforms.ToTensor(),
+            # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
+        ])
+    dataset = CustomSegmentation(root=root, split=split, mode=mode,
+                               transform=input_transform,
+                               base_size=base_size, crop_size=(base_size, base_size), low=0.6, high=2, sample_std=35)
 
     loader = data.DataLoader(dataset, batch_size=batch_size,
                              drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,
@@ -413,8 +528,10 @@ def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", m
 if __name__ == "__main__":
     t = transforms.Compose([  # 用于测试色彩和大小裁剪变换是否合理
         transforms.ColorJitter(brightness=0.45, contrast=0.45,
-                               saturation=0.45, hue=0.05)])
-    trainloader = get_citysbdd_loader(root='./data/citys/', split="val", mode="train", base_size=1024, crop_size=(832, 416), workers=0, pin=True, batch_size=4)
+                               saturation=0.45, hue=0.1)])
+    # trainloader = get_citys_loader(root='./data/citys/', split="val", mode="train", base_size=1024, crop_size=(832, 416), workers=0, pin=True, batch_size=4)
+    trainloader = get_custom_loader(root='./data/customdata/', split="train", mode="train", base_size=1024, workers=0, pin=True, batch_size=4)
+
     import time
     t1 = time.time()
     for i, data in enumerate(trainloader):
