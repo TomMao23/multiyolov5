@@ -13,8 +13,9 @@ In the semantic segmentation section, I refer to the following code:
 这是我的本科毕设，基于ultralytics/yolov5多任务模型。以增加少量计算和显存为代价，同时完成目标检测和语义分割(1024×512输入约增加350MB，同尺寸增加一个bisenet需要约1.3GB，两个单任务模型独立输入还有额外的延时)。模型在Cityscapes语义分割数据集和由Cityscapes实例分割标签转换来的目标检测数据集上同时训练，检测结果略好于原版单任务的YOLOV5(仅限于此实验数据集)，分割指标s模型验证集mIoU 0.73，测试集0.715；ｍ模型验证集mIoU 0.75测试集0.735。由于将继续考研，tag 2.0发布后仓库近期不会再更新，issue大概率不会回复(问题请参考以下Doc，震荡爆炸请尝试砍学习率)，未来版本可能由其他人整理/重构发布在[MANA AI](http://www.manaai.cn)。模型测试集指标和速度对比如上图(对比不完全公平，我用了yolo官方的COCO检测预训练模型，训练中使用了检测数据，但推理时会比以上模型多跑一个检测头)，可视化如下图：  
 效果视频见[bilibili demo video](https://www.bilibili.com/video/BV1Yv411p7Js)  
 ![avatar](./githubimage/40.png)  
-![avatar](./githubimage/38.png)  
-![avatar](./githubimage/39.png)  
+![avatar](./githubimage/43.jpg)  
+![avatar](./githubimage/44.png)  
+![avatar](./githubimage/41.png)
 ## Doc
 ### 0. Before Start 环境配置和数据集准备
 #### (a) Environment
@@ -87,7 +88,7 @@ $ python test_custom.py --data 你的.yaml --segdata 你的分割数据路径 --
 ### 3. Train 如何复现我的结果
 训练前先下载对应的原版(注意我是在tag V5.0代码上改的)COCO预训练模型做初始化，见原版readme和weights/download_weights.sh脚本
 ```bash
-$ python train.py --data cityscapes_det.yaml --cfg yolov5s_city_seg.yaml --batch-size 18 --epochs 200 --weights weights/yolov5s.pt --workers 8 --label-smoothing 0.1 --img-size 832 --noautoanchor
+$ python train.py --data cityscapes_det.yaml --cfg yolov5s_city_seg.yaml --batch-size 18 --epochs 200 --weights ./yolov5s.pt --workers 8 --label-smoothing 0.1 --img-size 832 --noautoanchor
 ```
 不一定如示例训200轮(这是我训上述预训练模型为了让其尽量收敛的参数)，建议最少训80轮，我一般训150到180轮  
 以上提到我的目标长边是1024，但这里是832，这个版本的代码为了节省显存增大batchsize和方便尝试加aux loss决定在832上训练调参，1024上推理．训练中输出的检测指标是832的，分割指标是1024的，建议训完再用test.py测试1024的结果  
@@ -156,12 +157,14 @@ yolov5的模型主架构代码，包括Model类和检测要用的Detect类，我
     - 原yolo的测试图片和一张apollo带桥(cityscapes没有，但是bdd100k有)且光线条件较差的图片被保留，展示模型何时不起作用（COCO尺度和Cityscapes很不一样）
 
 ### 5.自问自答，节省issue时间  
-    1. 训练时候报only test a child process或者加载卡住是BUG，但是程序其实没有死，等待一会
+    1. 训练时候报only test a child process或者加载卡住是BUG，但是程序其实没有死，等待一会（若有谁解决了加载效率和这个问题，烦请issue戳一下）
     2. testval mode加载器比较慢，但正常不应该达到2分钟以上
-    3. 没看过yolo源码可以魔改吗? -可以，直接在我的分割头和配置文件上改，可以不用去看解析函数等代码。涉及修改backbone，分割层不在24层，接口不同的分割头时候需要至少读过yolo.py  
+    3. 没看过yolo源码可以魔改吗? -可以，直接在我的分割头和配置文件上改，可以不用去看解析函数等代码。涉及修改backbone，分割层不在24层，接口不同的分割头时候需要至少读过yolo.py相关代码特别是Model的初始化、parse和run_once三部分  
     4. 训这个前建议至少训过原版yolov5，很多流程和原版一样
     5. 我把train_custom.py里的分割验证loader的batchsize改成1了，目的是兼顾有不同尺寸的数据集，同尺寸数据集嫌慢的可以手动改一下代码把分割验证batchsize调大。不同尺寸也嫌慢的可以去train_custom.py解注释val mode的loader然后把testval mode的loader注释  
     6. 训自己数据集看上面的教程链接，但还是建议读一下SegmentationDataset.py做了什么，必要时候自己实现类  
+    7. 代码接口和命名风格问题。这个仓库的代码有的是我自己写的，有的是我原样搬过来用的，更多是我参考论文及对应源码后抄过来实验修改的，所以接口设计和命名风格不一致，请见谅。  
+    8. 大量注释问题。在开始动手前我花了一个星期阅读yolov5的代码，为了节省时间和不产生歧义以及区分原版注释和我的记录，我在代码中写了大量中文注释。这些注释可能帮助初学者理解yolov5的一些函数，但未经过严格复查，如有错误注释或历史遗留注释请见谅。  
 --------
 原版readme分割线 
 
