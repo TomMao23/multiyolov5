@@ -45,7 +45,7 @@ $ mv ./labels ./detdata
 **bise.pt** 模仿BiSeNetV1的分割头，精度略大速度与base相似。16,19,22(PAN的1/8,1/16,1/32)输入，配置文件通道无效。ARM改成RFB2增强非线性BiSeNet每个Upsample后有一个3×3卷积refine，这里省计算放在Upsample前。BiSeNet的辅助损失系数是1，这里辅助损失太大结果不好。   
 **lab.pt** 模仿DeepLabV3+的分割头，验证集精度与psp和bise接近，速度。4,19(浅层1/8,PAN的1/16)输入，配置文件通道256。1/8图1×1卷积到48通道，1/16图过RFB1(ASPP类似的替代)。DeepLabV3+解码器部分用了浅层1/4和深层1/16，这里是1/8和1/16因为YOLO 1/4图通道数太少，并联后不3×3refine会比较破碎，refine则计算量太大。论文提到浅层大分辨率图通道少更利于训练，同论文到48。论文提到VOC用了ASPP全局更好，Cityscapes用了全局更差，这里也未使用全局。相比DeepLab这里多了FFM注意力融合结构。   
 **psp.pt** 模仿PSPNet的分割头,目前精度最高，速度仅次于base。16,19,22三层融合输入，未找到合适的地方放辅助损失，放弃辅助损失  
-**[Pretrained Model百度网盘](https://www.bilibili.com/video/BV1Yv411p7Js)**  
+**[Pretrained Model百度网盘](https://pan.baidu.com/s/19z-g_TsC7YtmRiX5G568zg)** 提取码**cjxg**    
 pspv5s.pt表示psp头的yolov5s模型，pspv5m.pt表示yolov5m其他几个命名同理，预训练模型均是用上述cityscapes分割数据和实例分割生成的检测数据训练的，19个分割类，10个检测类。pspv5m_citybdd_conewaterbarrier.pt这个模型的分割部分使用了bdd100k和cityscapes两个数据集混合，检测部分数据不开放，各种车辆均归为vehicle，pedestrain和rider均归为person，bike和motorcycle均归为cycle，另有三角锥cone和水马waterbarrier类别。  
 
 ### 1. Inference 推理图片、视频,用连续帧制作视频,向Cityscapes提交，测速
@@ -91,7 +91,7 @@ $ python train.py --data cityscapes_det.yaml --cfg yolov5s_city_seg.yaml --batch
 ```
 不一定如示例训200轮(这是我训上述预训练模型为了让其尽量收敛的参数)，建议最少训80轮，我一般训150到180轮  
 以上提到我的目标长边是1024，但这里是832，这个版本的代码为了节省显存增大batchsize和方便尝试加aux loss决定在832上训练调参，1024上推理．训练中输出的检测指标是832的，分割指标是1024的，建议训完再用test.py测试1024的结果  
-用--noautoanchor是因为COCO的anchor正好适合cityscapes1024的输入(832的autoanchor偏小了)，即使如此832上训1024推理虽然指标高了，但可视化会看到一些anchor的问题。若你的显卡有11G，可以适当调小batchsize直接用1024来训     
+用--noautoanchor是因为COCO的anchor正好适合cityscapes1024的输入(832的autoanchor偏小了)，能缓解anchor上的问题。即使如此832上训1024推理虽然指标高了，但可视化会看到一些anchor的问题。若你的显卡有11G，可以适当调小batchsize直接用1024来训     
 注意：为了加快训练我设置每10轮测试一次分割精度，最后40轮每轮测试分割精度  
 务必保证warmup期间(即我打印的accumulate达到目标值前)损失不发生过大震荡(现象：出现Nan，损失跑飞，严重影响到检测cls损失。一轮到两轮分割检测损失走高马上回落属正常现象)，出现以上现象考虑砍学习率，当前学习率理论上各种batchsize应该都不会跑飞。  
 **[训你自己的数据集请看这里](https://github.com/TomMao23/multiyolov5/tree/BS2021/data/customdata)**      
@@ -106,7 +106,7 @@ yolov5的模型主架构代码，包括Model类和检测要用的Detect类，我
    (2) Model的解析函数parse_model从yaml文件解析配置，如果想增加新的模块首先在common.py或yolo.py中实现该类，在parse_model中仿照写出该类的解析方法，再在配置文件中写入配置。如果仿照我的分割头类接口设计新增分割头，仅需实现类，在parse_model的解析分割头的支持列表中加入该类名即可。   
    
 4. models/yolov5s_city_seg.yaml  
-   我的模型配置文件，可以看到我在检测层前面加了分割层配置，并增加了分割类别(cityscapes是19)。推理不同head预训练模型不用修改，想训练不同head模型需要注释和解注释(psp、base和lab不用再改train.py但bise还要注释和解注释train.py的两个地方加入aux loss，后续会说明，接口设计缺陷，但暂时没时间改，实际上用psp、base、lab就够了，除非你想增加辅助损失)。s，m，l模型参照原版，区别仅在控制深度和宽度的depth_multiple, width_multiple数值（base，psp和lab的分割头也会随s，m，l自动放缩）。    
+   模型配置文件，可以看到我在检测层前面加了分割层配置，并增加了分割类别(cityscapes是19)。推理不同head预训练模型不用修改，想训练不同head模型需要注释和解注释(psp、base和lab不用再改train.py但bise还要注释和解注释train.py的两个地方加入aux loss，后续会说明，接口设计缺陷，但暂时没时间改，实际上用psp、base、lab就够了，除非你想增加辅助损失)。s，m，l模型参照原版，区别仅在控制深度和宽度的depth_multiple, width_multiple数值（base，psp和lab的分割头也会随s，m，l自动放缩）。    
    
 5. data/cityscapes_det.yaml  
 检测数据集配置，同原版，新增了分割数据集地址，train.py读分割数据地址是按这里配置的  

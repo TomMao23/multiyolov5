@@ -30,7 +30,7 @@ $ python train_custom.py --data 你的数据.yaml --cfg 你的模型.yaml --batc
   tips：若转换失败要删除输出文件夹重新运行脚本  
 - 使用convert2Yolo工具把检测转为yolo格式
   ```bash
-  python convert2Yolo/example.py --datasets VOC --img_path ./example/detvoc/JPEGImages --label ./example/detvoc/Annotations --convert_output_path ./example/yolodetlabels --img_type ".jpg" --manifest_path ./example --cls_list_file ./example/names.txt 
+  $ python convert2Yolo/example.py --datasets VOC --img_path ./example/detvoc/JPEGImages --label ./example/detvoc/Annotations --convert_output_path ./example/yolodetlabels --img_type ".jpg" --manifest_path ./example --cls_list_file ./example/names.txt 
   ```
   即可在./example/yolodetlabels找到转换完成的yolo标签，这些就是要放入detdata的labels/train或val内的检测标签，把对应的图像也放在detdata的images/train或val里。根据以上和主目录的REAME说明修改训练和测试部分命令，修改为你的数据集(customdata/detdata)、数据集配置文件、模型配置文件路径即完成了检测部分的数据准备
 - 使用generate_mask.py把voc格式的分割npy文件转为png格式的mask  
