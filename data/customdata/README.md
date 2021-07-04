@@ -13,8 +13,8 @@
 ```bash
 $ python train_custom.py --data 你的数据.yaml --cfg 你的模型.yaml --batch-size 18 --epochs 100 --weights weights/yolov5s.pt --workers 8 --label-smoothing 0.1 --img-size 832 --device 0
 ```
-注意：训自己的数据一般就不要关autoanchors了，--img-size既是检测的训练尺寸，也是分割的crop-size和base-size(分割crop前resize的大小)，会不均匀的随机按长边resize到base-size的一定范围（默认0.5到2倍）再crop出img-size × img-size一块用于训练分割（要更改请参考train_custom.py和SegmentationDataset.py。train.py与train_custom.py略不同，针对cityscapes和bdd100k写死了base-size=1024没有暴露出来，crop是矩形而非方形，长边由img-size指定，建议832）   
-## 训练自己数据前请认真思考base-size和crop-size的设置是否合理(建议用IDE先打断点开debug调试Segmentation.py可视化crop效果)，这将极大影响训练效果
+注意：训自己的数据一般就不要关autoanchors了，--img-size既是检测的训练尺寸，也是分割的crop-size和base-size(分割crop前resize的大小)，会不均匀的随机按长边resize到base-size的一定范围（默认0.75到1.5倍）再crop出(img-size, img-size)一块用于训练分割（要更改请参考train_custom.py和SegmentationDataset.py。train.py与train_custom.py略不同，针对cityscapes和bdd100k写死了base-size=1024没有暴露出来，crop是矩形而非方形，长边由img-size指定，建议832或1024）   
+## 训练自己数据前请认真考虑base-size和crop-size的设置是否合理(建议用IDE先打断点开debug调试Segmentation.py可视化crop效果)，这将极大影响训练效果
 ## labelme标注数据转换
 当前customdata文件夹里的示例数据就是convert_tools/example的转换结果,转换后  
 转换工具在convert_tools中  

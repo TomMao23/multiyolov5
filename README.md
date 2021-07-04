@@ -43,7 +43,7 @@ $ mv ./labels ./detdata
 `推荐指数：Lab和PSP > Base和BiSe`  
 **base.pt** 基础版本的分割head。16层(PAN1/8)输入，配置文件通道512。C3，通道略拓宽版本的C3SPP，dropout(0.1)，1×1卷积到类别。速度精度综合效果不错，但是SPP配1/8图感受野其实不够大，s模型够好了，但m模型加深加宽后提高量不让人满意。  
 **bise.pt** 模仿BiSeNetV1的分割头，精度略大速度与base相似。16,19,22(PAN的1/8,1/16,1/32)输入，配置文件通道无效。ARM改成RFB2增强非线性BiSeNet每个Upsample后有一个3×3卷积refine，这里省计算放在Upsample前。BiSeNet的辅助损失系数是1，这里辅助损失太大结果不好。   
-**lab.pt** 模仿DeepLabV3+的分割头，验证集精度与psp和bise接近，速度。4,19,22(浅层1/8,PAN的1/16和1/32)输入，配置文件通道256。1/8图1×1卷积到48通道，1/16图和1/32图融合后过ASPP(砍过通道)。DeepLabV3+解码器部分用了浅层1/4和深层1/16，这里是1/8和1/16因为YOLO 1/4图通道数太少，并联后不3×3refine会比较破碎，refine则计算量太大。论文提到浅层大分辨率图通道少更利于训练，同论文到48。论文提到VOC用了ASPP全局更好，Cityscapes用了全局更差，这里也未使用全局。相比DeepLab这里多了FFM注意力融合结构，解码器用了bisenet的配置。   
+**lab.pt** 模仿DeepLabV3+的分割头，验证集精度与psp和bise接近，速度。4,19(浅层1/8,PAN的1/16)输入，配置文件通道256。1/8图1×1卷积到48通道，1/16图过RFB1(ASPP类似的替代)。DeepLabV3+解码器部分用了浅层1/4和深层1/16，这里是1/8和1/16因为YOLO 1/4图通道数太少，并联后不3×3refine会比较破碎，refine则计算量太大。论文提到浅层大分辨率图通道少更利于训练，同论文到48。论文提到VOC用了ASPP全局更好，Cityscapes用了全局更差，这里也未使用全局。相比DeepLab这里多了FFM注意力融合结构。   
 **psp.pt** 模仿PSPNet的分割头,目前精度最高，速度仅次于base。16,19,22三层融合输入，未找到合适的地方放辅助损失，放弃辅助损失  
 **[Pretrained Model百度网盘](https://www.bilibili.com/video/BV1Yv411p7Js)**  
 pspv5s.pt表示psp头的yolov5s模型，pspv5m.pt表示yolov5m其他几个命名同理，预训练模型均是用上述cityscapes分割数据和实例分割生成的检测数据训练的，19个分割类，10个检测类。pspv5m_citybdd_conewaterbarrier.pt这个模型的分割部分使用了bdd100k和cityscapes两个数据集混合，检测部分数据不开放，各种车辆均归为vehicle，pedestrain和rider均归为person，bike和motorcycle均归为cycle，另有三角锥cone和水马waterbarrier类别。  
