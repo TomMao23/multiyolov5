@@ -232,8 +232,8 @@ class SegmentationLosses(nn.CrossEntropyLoss):
         self.bceloss = nn.BCELoss(weight)
         self.aux_num = aux_num
 
-    def forward(self, *inputs):  # 这里接口写的很丑,没时间重构了
-        if not self.se_loss and not self.aux:  # 无aux
+    def forward(self, *inputs):  # 这里接口写的很丑,没时间重构了,直接点就是无aux不用[],有aux几个结果输出用[]包装
+        if not self.se_loss and not self.aux:  # 无aux, Base,PSP和Lab用这个
             return super(SegmentationLosses, self).forward(*inputs)
         elif not self.se_loss:      
             if self.aux_num == 2:  # 两个aux，BiSe用这个
@@ -242,7 +242,7 @@ class SegmentationLosses(nn.CrossEntropyLoss):
                 loss2 = super(SegmentationLosses, self).forward(pred2, target)
                 loss3 = super(SegmentationLosses, self).forward(pred3, target)
                 return loss1 + self.aux_weight*1.5 * loss2 + self.aux_weight/2.0 * loss3
-            else:  # 一个aux, Lab用这个
+            else:  # 一个aux, 目前没有用这个
                 assert self.aux_num == 1
                 pred1, pred2, target = tuple(inputs)
                 loss1 = super(SegmentationLosses, self).forward(pred1, target)
@@ -262,18 +262,18 @@ class SegmentationLosses(nn.CrossEntropyLoss):
             loss3 = self.bceloss(torch.sigmoid(se_pred), se_target)
             return loss1 + self.aux_weight * loss2 + self.se_weight * loss3
 
-    @staticmethod
-    def _get_batch_label_vector(target, nclass):
-        # target is a 3D Variable BxHxW, output is 2D BxnClass
-        batch = target.size(0)
-        tvect = Variable(torch.zeros(batch, nclass))
-        for i in range(batch):
-            hist = torch.histc(target[i].cpu().data.float(),
-                               bins=nclass, min=0,
-                               max=nclass-1)
-            vect = hist>0
-            tvect[i] = vect
-        return tvect
+    # @staticmethod
+    # def _get_batch_label_vector(target, nclass):
+    #     # target is a 3D Variable BxHxW, output is 2D BxnClass
+    #     batch = target.size(0)
+    #     tvect = Variable(torch.zeros(batch, nclass))
+    #     for i in range(batch):
+    #         hist = torch.histc(target[i].cpu().data.float(),
+    #                            bins=nclass, min=0,
+    #                            max=nclass-1)
+    #         vect = hist>0
+    #         tvect[i] = vect
+    #     return tvect
 
 
 class SegFocalLoss(nn.CrossEntropyLoss):
@@ -297,11 +297,11 @@ class SegFocalLoss(nn.CrossEntropyLoss):
         else: return loss
 
 
-# 以下有两种OHEM实现略有不同，分别是根据两个bisenet实现修改的，aux使用接口一致, 目前使用第二种，第一种实现更快(batchsize＝12时候一轮快22s)
+# 以下有两种OHEM实现略有不同，分别是根据两个bisenet实现修改的，aux使用接口一致, 第一种实现更快(batchsize＝12时候一轮比第二种快22s)
 # bisenet的aux和main loss是同权重的[1.0, 1.0]但我的实验同权重非常不好，我认为辅助权重应该低于主权重，很多其他网络实现也是辅助权重低的
 # 第一种
 class OhemCELoss(nn.Module):  # 带ohem和aux的CE，0.7是根据bisenet原作者和复现者参数确定的
-    def __init__(self, thresh=0.5, ignore_index=-1, aux=False, aux_weight=[0.4, 0.4]):  # 辅助损失可以设小，但bisenet里辅助损失系数为1(同权)，pytorch encoding项目默认0.2
+    def __init__(self, thresh=0.5, ignore_index=-1, aux=False, aux_weight=[0.15, 0.05]):  # 辅助损失可以设小，但bisenet里辅助损失系数为1(同权)，pytorch encoding项目默认0.2
         super(OhemCELoss, self).__init__()
         self.thresh = -torch.log(torch.tensor(thresh, requires_grad=False, dtype=torch.float)).cuda()
         self.ignore_index = ignore_index
@@ -313,13 +313,13 @@ class OhemCELoss(nn.Module):  # 带ohem和aux的CE，0.7是根据bisenet原作�
         if not self.aux:  # 此时preds应该为单个输出
             return self.forward_once(preds, labels)
         else:  # 此时preds应该为三个输出并用[]包裹起来，preds[0]永远是主输出
-            mainloss = self.forward_once(preds[0], labels)  # 若采用resize标签到来节约显存参考下两行注释替换labels，并且去除yolo.py分割head的aux部分的上采样
-            auxloss1 = self.forward_once(preds[1], F.interpolate(labels.float().unsqueeze(0), labels))  #  (preds[1].shape[2], preds[1].shape[3]), mode='nearest')[0].long())
-            auxloss2 = self.forward_once(preds[2], F.interpolate(labels.float().unsqueeze(0), labels))  #  (preds[2].shape[2], preds[2].shape[3]), mode='nearest')[0].long())
+            mainloss = self.forward_once(preds[0], labels)  # 若采用resize标签到来节约显存参考下两行注释替换labels，并且去除yolo.py分割head的aux部分的上采样(不推荐resize标签)
+            auxloss1 = self.forward_once(preds[1], labels)  #  (preds[1].shape[2], preds[1].shape[3]), mode='nearest')[0].long())
+            auxloss2 = self.forward_once(preds[2], labels)  #  (preds[2].shape[2], preds[2].shape[3]), mode='nearest')[0].long())
             return mainloss + self.aux_weight[0] * auxloss1 + self.aux_weight[1] * auxloss2
 
     def forward_once(self, preds, labels):
-        n_min = int(labels[labels != self.ignore_index].numel() // 16)  #(16*8**2)  # 最少样本公式是按原作者表达式写的(这个实现少除以8**2) 原式int(config.batch_size // len(engine.devices) * config.image_height * config.image_width //(16 * config.gt_down_sampling ** 2))
+        n_min = int(labels[labels != self.ignore_index].numel() // 16)  # 1/16=(1/4)^2即不计ignore的1/4张图  #(16*8**2)  # 最少样本公式是按bisenet原作者表达式写的(这个实现少除以8**2) 原式int(config.batch_size // len(engine.devices) * config.image_height * config.image_width //(16 * config.gt_down_sampling ** 2))
         # print(n_min)
         loss = self.criteria(preds, labels).view(-1)
         loss_hard = loss[loss > self.thresh]

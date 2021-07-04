@@ -1,5 +1,5 @@
 # parameters
-nc: 10  # number of classes
+nc: 5  # number of classes
 n_segcls: 19 # 多一个分割类别数, 如果用新代码也可以训练老配置, 可以没SegMask但要随便设个n_segcls
 depth_multiple: 0.67  # model depth multiple
 width_multiple: 0.75  # layer channel multiple

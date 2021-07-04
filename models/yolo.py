@@ -23,35 +23,37 @@ except ImportError:
     thop = None
 
 
-# 模仿bisenet但upsample的refine改成up前(bise upsample后有3*3卷积)
-# bisenetv1是一层3*3降到64(辅助128)这里同，辅助损失系数bisenet两个1，这里是两个0.1
-class SegMaskBiSe(nn.Module):  # 三层注意力，两层相加，一层并联FFM  配置文件输入[16, 19, 22]通道写256（即ｓ模型128）
-    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数(接口保留了,没有使用)
+# 尽可能按照原版bisenet的头试过了，同单独一个ARM不够深(本身只是一个3*3加注意力)，和检测冲突精度降低;在ARM前面增加模块精度很好,但是本身三层融合三层都加模块速度不可接受，因此魔改用非线性较强的RFB2替代ARM
+# 模仿bisenet魔改头upsample的refine改成up前降低计算量(bise upsample后有3*3卷积)
+# bisenetv1是一层3*3降到64(辅助128)这里辅助同，辅助损失系数bisenet两个1，这里是一个0.15一个0.05(检测分割多任务以及YOLO本身的backbone目前aux loss实验没有明显改进,不排除与我用了COCO预训练有关，除此头外放弃aux loss)
+# 删除ARM(实验结论此处ARM没用，FFM有用但1*1后3*3减小通道到64分类不如直接3*3FFM后分类,可能与我最终使用16层而不是双流或者更浅层有关，融合浅层需要更深一点见SegMaskLab)
+class SegMaskBiSe(nn.Module):  # 配置文件输入[16, 19, 22]通道无效
+    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数(接口保留了,没有使用,可用子模块控制s,m,l加深加宽)
         super(SegMaskBiSe, self).__init__()
-        self.c_in8 = ch[0]  # 4 YOLO的FPN是cat不是add，16cat了完整的4，理论上可以学出来，然而直接用４效果更好(同cat后1*1包含了add却经常没add好一样，问题在正则而不是容量),新配置选择4输入
+        self.c_in8 = ch[0]  # 16 Lab实验用4更好，但是BiSe实验用16更好（原因可能在1/8通道一个48一个128）
         self.c_in16 = ch[1]  # 19
         self.c_in32 = ch[2]  # 22
         self.c_out = n_segcls
 
-        self.m8 = nn.Sequential(  # 未完全采用双流结构，从第3层1/8图输入，yolo 16层的1/8图偏语义了
-                               Conv(self.c_in8, 128, k=3, s=1), 
+        self.m8 = nn.Sequential(  # 未采用双流结构
+                               Conv(self.c_in8, 128, k=1, s=1), 
                                )
         self.m16 = nn.Sequential(
-                               RFB(self.c_in16, 128, map_reduce=5, d=[3,5,7], has_gloabel=False),
-                               #ARM(128, 128), 实验没看出ARM的明显作用，FFM到是不错
-                               #Conv(128, 128, k=3),
+                               RFB2(self.c_in16, 128, map_reduce=4, d=[2,3], has_globel=False),  # 魔改模块(和RFB没啥关系了,原则是增强分割入口非线性,同时扩大感受野和兼顾多尺度)，实验速度精度效果还不错
+                               # Attention(128),  # 可选，这层与1/32up相加，有相加处用Attention也是BiSeNet的ARM模块设计的初衷。前面有复杂模块，Attention就够了，没必要用ARM多个3*3计算量，核心目的是一样的
+                               # ARM(128, 128), 
                                )
-        self.m32 = nn.Sequential(                                     # 对应deeplab 1/16处的6,12,18,此处1/32减半更多
-                               RFB(self.c_in32, 128, map_reduce=8, d=[3,5,7], has_gloabel=True),  # 舍弃原GP，在1/32处加全局
-                               #ARM(128, 128),
-                               #Conv(128, 128, k=3),
+        self.m32 = nn.Sequential(
+                               RFB2(self.c_in32, 128, map_reduce=8, d=[2,3], has_globel=True),  # 舍弃原GP，在1/32(和1/16，可选)处加全局特征
+                               # Attention(128),  # 改变了globel特征的获取方式，这层不用和globel特征相加，因此没必要用ARM或者Attention
+                               # ARM(128, 128),
                                )
         # self.GP = nn.Sequential(
         #                        nn.AdaptiveAvgPool2d(1),
         #                        Conv(self.c_in32, 128, k=1),
         # )
         self.up16 = nn.Sequential(
-                               Conv(128, 128, 3),  # refine论文源码每次up后一个3*3refine，降低计算量放在前，特征融合后至少1个conv最好是k=3
+                               Conv(128, 128, 3),  # refine论文源码每次up后一个3*3refine，降低计算量放在前
                                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
         )
         self.up32 = nn.Sequential(
@@ -59,10 +61,9 @@ class SegMaskBiSe(nn.Module):  # 三层注意力，两层相加，一层并联FF
                                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
         )
         self.out = nn.Sequential(
-                               FFM(256, 256),
-                               Conv(256, 256, 3),  # 主256到64，辅助128到128
-                               nn.Dropout(0.1),
-                               nn.Conv2d(256, self.c_out, kernel_size=1),
+                               FFM(256, 256, k=3),  
+                               nn.Dropout(0.1),  # 最后一层改用3*3，我认为用dropout不合适（dropout对3*3响应空间维度形成遮挡），改为dropout2d（随机整个通道置０增强特征图独立性，空间上不遮挡）
+                               nn.Conv2d(256, self.c_out, kernel_size=1, padding=0),
                                nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
         )
         # 辅助分割头，训练用，推理丢弃
@@ -79,54 +80,52 @@ class SegMaskBiSe(nn.Module):  # 三层注意力，两层相加，一层并联FF
 
     def forward(self, x):
         # GP = self.GP(x[2])  # 改成直接用广播机制加 F.interpolate(self.GP(x[2]), (x[2].shape[2], x[2].shape[3]), mode='nearest')  # 全局
-        feat3 = self.up32(self.m32(x[2]))  # + GP) 
+        feat3 = self.up32(self.m32(x[2]))  #  + GP) 
         feat2 = self.up16(self.m16(x[1]) + feat3)
         feat1 = [self.m8(x[0]), feat2]
         return self.out(feat1) if not self.training else [self.out(feat1), self.aux16(feat2), self.aux32(feat3)]
 
 
-# 这个头虽然GFLOPS高，但是延时只是略高于segmaskbase模型(2080ti上base 6.8到6.9ms，这个配置的lab ７.1ms，可以砍到6.9到7ms，精度只是略降)
-# 模仿DeepLabV3+(1/4和1/16)　但是YOLO的1/4图通道太少(只有64,deeplab的backbone常有256以上所以1*1降维),这里取1/8和1/16
-# 融合部分加了FFM,最后一层3*3降到64，deeplabv3+是两层3*3保持256通道,bisenetv1是一层3*3降到64(辅助128)
-# deeplabv3+论文经验是编码器解码器结构中，解码部分使用更少的浅层通道利于训练(论文48，32或64也接近，论文提了VOC当中用全局后提升，citys用全局后下降，这里遵循不用全局)
-class SegMaskLab(nn.Module):  #   配置文件[16, 19], 通道配置无效
-    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数(接口保留了,没有使用)
+# DeepLabV3+的encoder-decoder结构其实只涨了1个点(VOC上)，启示是ASPP放在1/16图上结合浅层图也能有很好的效果(如果放在1/8图是不会考虑在此模型尝试ASPP的,太重了,放在1/32试验过精度掉了,延时也没下去很多)
+# 模仿DeepLabV3+(论文1/4和1/16)　但是YOLO的1/4图太过于浅且通道太少(s只有64,deeplab的backbone常有256以上所以1*1降维)而且1/4最后用3*3 refine计算量太大,这里取1/8和1/16
+# 融合部分加了FFM(k改3)，deeplabv3+是两层3*3保持256通道（太奢侈），深浅并联融合第一层最好是3*3
+# deeplabv3+论文经验是编码器解码器结构中，解码部分使用更少的浅层通道利于学习(论文48，32或64也接近，论文提了VOC当中用全局后提升，citys用全局后下降，这里没有用全局)
+class SegMaskLab(nn.Module):  #   配置文件[3, 16, 19, 22], 通道配置无效
+    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n此处用于控制ASPP的map_reduce,配置文件写3, c_hid是输出通道数配置文件写256
         super(SegMaskLab, self).__init__()
-        self.c_in8 = ch[0]  #４ YOLO的FPN是cat不是add，16cat了完整的4，理论上可以学出来，然而直接用４效果好于16(同cat后1*1包含了add却并不一定比add好，问题在正则而不是容量)。
-        self.c_in16 = ch[1]  #19
+        self.c_detail = ch[0]  # 4 YOLO的FPN是cat不是add，16cat了完整的4，理论上可以学出来，然而直接用４效果略好于16(同cat后1*1包含了add却并不总是比add好，问题在正则而不是容量)。
+        self.c_in16 = ch[1]  # 19
         self.c_out = n_segcls
-        # 实验效果细节层４和３近似>16, 使用1/16，没像deeplab原文一样直接用1/4
-        self.m8 = nn.Sequential(Conv(self.c_in8, 64, k=1),
-                                #Conv(64, 64, k=3),
+        # 实验效果细节层４>16, 使用1/8，没像deeplabv3+原文一样直接用1/4（l等大模型追求精度可以考虑用1/4相应的我认为融合层也该增加为两个3*3同原文）
+        self.detail = nn.Sequential(Conv(self.c_detail, 48, k=1),
+                                    Conv(48, 48, k=3),
                                )
-        self.m16 = nn.Sequential(  # 组合是先3*3配ASPP，或用RFB前后可选一个3*3，两种组合速度相近，ARM不见得优于普通3*3
-                               # Conv(self.c_in16, self.c_in16, k=1),
-                               # RFB(self.c_in16, 256, map_reduce=4, d=[3, 6, 9], has_gloabel=True),  # 1024输入就是半分辨率，369(deeplab为6,12,18)够了(而且RFB比ASPP多垫了一层3*3)
-                               # 同样hid砍得越少精度越高(这里问题在容量)，//1相当于标准ASPP，2080ti上//4时0.71ms,按照注释
-                               ASPP(self.c_in16, self.c_in16//4, 256, d=[3, 6, 9], has_gloabel=True), # 精度确实高，但是ASPP太重了，砍通道
-                               nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+        self.encoder = nn.Sequential(
+                                # hid砍得越少精度越高(这里问题在容量)，maep_reduce=1相当于标准ASPP
+                                # 未使用全局，一方面遵照论文，一方面用了全局后出现边界破碎的情况
+                                # ASPP(c_hid*2, 256, d=[4, 7, 10], has_globel=False, map_reduce=5-n), # ASPP确实好，但是太重了，砍到了1/4通道 s:5-1=4, m:5-2=3, l:5-3=2
+                                # 这两个都是ASPP的替代品, ASPP也有一个问题，光一个ASPP不够深，ASPPs和RFB1中间输入一起砍，ASPPs砍完可以选择前面加其他模块，RFB1砍后增加了3*3和5*5
+                                # ASPPs(256, 256, d=[4, 7, 10], has_globel=False, map_reduce=5-n), # 
+                                RFB1(self.c_in16, 256, d=[3, 5, 7], has_globel=False, map_reduce=max(4-n, 2)),
+                                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
                                )
-        self.out = nn.Sequential(
-                               FFM(256+64, 256),
-                               Conv(256, 256, 3),
-                               nn.Dropout(0.1),
-                               nn.Conv2d(256, self.c_out, kernel_size=1),
+        self.decoder = nn.Sequential(
+                               # 原论文两个3*3保持256(文中实验表示保持256最重要，其次是3*3)，此处为了速度还是得砍到128(第一个融合处想继续用3*3保证深浅融合效果)
+                               FFM(256+48, c_hid, k=3, is_cat=True),  # 融合用bisenet的配置
+                               Conv(c_hid, c_hid, k=3),  # 经验是不管多宽，k取3还是1，用三层融合输出(有浅层融合)
+                               nn.Conv2d(c_hid, self.c_out, kernel_size=1, padding=0),
                                nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
-        )
-        self.aux16 = nn.Sequential(
-                               Conv(self.c_in16, 256, 3),  
-                               nn.Dropout(0.1), 
-                               nn.Conv2d(256, self.c_out, kernel_size=1),
-                               nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True),
-        )
+                                )
+
     def forward(self, x):
-        feat16 = self.m16(x[1])
-        feat8 = self.m8(x[0])
-        return self.out([feat8, feat16]) if not self.training else [self.out([feat8, feat16]), self.aux16(x[1])]  # yolo的neck太复杂,辅助损失位置不好选,选择放在ASPP前
+        feat16 = self.encoder(x[1])  # 1/16主语义
+        feat8 = self.detail(x[0])  # 1/8浅层
+        # return self.decoder([feat8, feat16]) if not self.training else [self.decoder([feat8, feat16]), self.aux(x[1])]
+        return self.decoder([feat8, feat16])
 
 
 # 一个性能不错的分割头140+FPS，验证集72.7~73.0,把1.5改成1.0则是72.4到72.7
-# SPP增大了感受野，也提高了感受野灵活性但还不够(我认为比起ASPP等的差距是本backbone和指标体现不出的,在数据集外的图上可视化能体现)，1/8比较大，SPP比较小，没有更大感受野
+# SPP增大了感受野，也提高了多尺度但还不够(我认为比起ASPP等的差距是本backbone和指标体现不出的,在数据集外的图上可视化能体现)，1/8比较大，SPP比较小，没有更大感受野
 class SegMaskBase(nn.Module):
     def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, c_hid是C3的输出通道数
         super(SegMaskBase, self).__init__()
@@ -134,22 +133,57 @@ class SegMaskBase(nn.Module):
         self.c_out = n_segcls
         self.m = nn.Sequential(C3(c1=self.c_in, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
                                # SPP(c_hid, c_hid, k=(5, 9, 13)),
-                               #C3SPP2(c1=c_hid, c2=c_hid, k=(5, 9, 13, 17), g=1, e=0.5),
-
-                               #nn.Dropout2d(0.3, True),
-                               #C3SPPD(c1=c_hid, c2=c_hid, k=(5, 9, 13, 17), g=1, e=0.5),
-                               #C3SPP2(c1=c_hid, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
                                C3SPP(c1=c_hid, c2=int(c_hid*1.5), k=(5, 9, 13), g=1, e=0.5),
 
                                #C3(c1=c_hid, c2=c_hid, n=n, shortcut=shortcut, g=1, e=0.5),
                                #Conv(c1=c_hid, c2=c_hid, k=1, s=1),
                                nn.Dropout(0.1, True),
                                nn.Conv2d(int(c_hid*1.5), self.c_out, kernel_size=(3, 3), stride=(1, 1),
-                                         padding=(1, 1), groups=1, bias=False),  # kernel 1*1, 不激活不BN
+                                         padding=(1, 1), groups=1, bias=False),  # 后续几个头实验表明最后一层kernel还是1*1略好, base没有重训
                                nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True), )
 
     def forward(self, x):
         return self.m(x[0])  # self.up(self.conv(self.c3(x[0])))
+
+
+class SegMaskPSP(nn.Module):  # PSP头，多了RFB2和FFM，同样砍了通道数，没找到合适的位置加辅助损失，因此放弃辅助损失
+    def __init__(self, n_segcls=19, n=1, c_hid=256, shortcut=False, ch=()):  # n是C3的, (接口保留了,没有使用)c_hid是隐藏层输出通道数（注意配置文件s*0.5,m*0.75,l*1）
+        super(SegMaskPSP, self).__init__()
+        self.c_in8 = ch[0]  # 16  # 用16,19,22宁可在融合处加深耗费一些时间，检测会涨点分割也很好。严格的消融实验证明用17,20,23分割可能还会微涨，但检测会掉３个点以上，所有头如此
+        self.c_in16 = ch[1]  # 19
+        self.c_in32 = ch[2]  # 22
+        # self.c_aux = ch[0]  # 辅助损失  找不到合适地方放辅助，放弃
+        self.c_out = n_segcls
+        # 注意配置文件通道写256,此时s模型c_hid＝128
+        self.out = nn.Sequential(  # 实验表明引入较浅非线性不太强的层做分割会退化成检测的辅助(分割会相对低如72退到70,71，检测会明显升高)，PP前应加入非线性强一点的层并适当扩大感受野
+                                RFB2(c_hid*3, c_hid, d=[2,3], map_reduce=6),  # 3*128//6=64　RFB2和RFB无关，仅仅是历史遗留命名(训完与训练模型效果不错就没有改名重训了)
+                                PyramidPooling(c_hid, k=[1, 2, 3, 6]),  # 按原文1,2,3,6，PSP加全局更好，但是ASPP加了全局后出现边界破碎
+                                FFM(c_hid*2, c_hid, k=3, is_cat=False),  # FFM改用k=3, 相应的砍掉部分通道降低计算量(原则就是差距大的融合哪怕砍通道第一层也最好用3*3卷积，FFM融合效果又比一般卷积好，除base头外其他头都遵循这种融合方式)
+                                nn.Conv2d(c_hid, self.c_out, kernel_size=1, padding=0),
+                                nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
+                               )
+        self.m8 = nn.Sequential(
+                                Conv(self.c_in8, c_hid, k=1),
+        )
+        self.m32 = nn.Sequential(
+                                Conv(self.c_in32, c_hid, k=1),
+                                nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True),
+        )
+        self.m16 = nn.Sequential(
+                                Conv(self.c_in16, c_hid, k=1),
+                                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+        )
+        # self.aux = nn.Sequential(
+        #                        Conv(self.c_aux, 256, 3),  
+        #                        nn.Dropout(0.1, False), 
+        #                        nn.Conv2d(256, self.c_out, kernel_size=1),
+        #                        nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
+        # )
+    def forward(self, x):
+        # 这个头三层融合输入做过消融实验，单独16:72.6三层融合:73.5,建议所有用1/8的头都采用三层融合，在Lab的实验显示三层融合的1/16输入也有增长
+        feat = torch.cat([self.m8(x[0]), self.m16(x[1]), self.m32(x[2])], 1)
+        # return self.out(feat) if not self.training else [self.out(feat), self.aux(x[0])]
+        return self.out(feat)
 
 
 class Detect(nn.Module):  # 检测头
@@ -353,7 +387,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         # n控制深度, yaml配置文件中num为1就1次,num>1就 num*depth_multiple次, 即此block本身以及block子结构重复次数
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
-                 C3, C3TR]:
+                 C3, C3TR, ASPP]:
             c1, c2 = ch[f], args[0]  # 指定层输入(c1)输出(c2)通道数(ch记录各层输出通道,f表输入层下标,输入层的输出通道就是本层输入通道)
             if c2 != no:  # if not output 对非输出层, 原作者此处代码有风险
                 c2 = make_divisible(c2 * gw, 8)  # 实际输出通道数是 配置文件的c2 * width_multiple 并向上取到可被8整除
@@ -370,11 +404,11 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             args.append([ch[x] for x in f])  # 检测层, 把来源下标列表f中的层输出通道数加入args中, 用于构建Detect的卷积输入通道数
             if isinstance(args[1], int):  # number of anchors 一般跑不进这句, args[1]是anchors在配置文件中已用列表写好, 非int
                 args[1] = [list(range(args[1] * 2))] * len(f)
-        elif m in [SegMaskBiSe, SegMaskLab, SegMaskBase]:  # 语义分割头
-            args[1] = max(round(args[1] * gd), 1) if args[1] > 1 else args[1]  # SegMask 中 C3 的n
-            args[2] = make_divisible(args[2] * gw, 8)  # SegMask C3 的输出通道数
+        elif m in [SegMaskBiSe, SegMaskLab, SegMaskBase, SegMaskPSP]:  # 语义分割头
+            args[1] = max(round(args[1] * gd), 1) if args[1] > 1 else args[1]  # SegMask 中 C3 的n(Lab里用来控制ASPP砍多少通道)
+            args[2] = make_divisible(args[2] * gw, 8)  # SegMask C3(或其他可放缩子结构) 的输出通道数
             args.append([ch[x] for x in f])
-            # n = 1 不用设1了, SegMask自己的n永远1
+            # n = 1 不用设1了, SegMask自己配置文件的n永远1
         elif m is Contract:
             c2 = ch[f] * args[0] ** 2
         elif m is Expand:

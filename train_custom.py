@@ -224,16 +224,28 @@ def train(hyp, opt, device, tb_writer=None):
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)  # anchor_t是最大放大倍数,yolov5公式不同于v3v4, 见核心Model推理时anchor偏移放缩公式和issue
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
-    # 分割 loader   citys和bdd的basesize都取1024,crop_size长边取imgsz,短边imgsz砍半
-        seg_valloader = SegmentationDataset.get_citys_loader(root=segval_path, batch_size=4,
+    # 图尺寸相同时候用这个准确测指标（batch_size设为1可以支持图尺寸不同, 或者用下面的val mode）
+        seg_valloader = SegmentationDataset.get_custom_loader(root=segval_path, batch_size=1,
                                                          split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
-                                                         base_size=1024,   # 对cityscapes, 原图resize到(1024, 512)输入后双线性插值到原图尺寸计算精度
+                                                         base_size=imgsz,   # 原图按照长边resize到imgz输入后双线性插值到原图尺寸计算精度
                                                          # crop_size=640,  # testval 时候cropsize不起作用
-                                                         workers=4, pin=True)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
+                                                         workers=2, pin=True)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
                                                                      # 我电脑上(4,4)是最快的, 更大子进程会挂(现在图大了,怎么设都会挂, BUG)
-    seg_trainloader = SegmentationDataset.get_citys_loader(root=segtrain_path,
+
+    # # 图尺寸不同时候改用val模式,一般会比标准目标输入低一点
+    #     seg_valloader = SegmentationDataset.get_citysbdd_loader(root=segval_path, batch_size=4,
+    #                                                      split="val", mode="val",  # 和train.py不同，使用val模式
+    #                                                      base_size=1024,   # val模式base_size无效
+    #                                                      # crop_size手动取，建议目标输入的短边尺寸，如cityscapes取512
+    #                                                      crop_size=512,  # 图尺寸不同，用val，按短边resize到cropsize再crop（cropsize，cropsize）
+    #                                                      workers=4, pin=True)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
+    #                                                                  # 我电脑上(4,4)是最快的, 更大子进程会挂(现在图大了,怎么设都会挂, BUG)
+    
+    # 分割 loader custom的base_size和crop_size的长边就是imgsz
+    seg_trainloader = SegmentationDataset.get_custom_loader(root=segtrain_path,
                                                            split="train", mode="train",
-                                                           base_size=1024, crop_size=(imgsz, imgsz//2),  # cropsize长边和检测同，短边砍半(针对cityscapes,bdd也行)
+                                                           base_size=imgsz,
+                                                           # custom的crop_size就是(imgsz, imgsz)
                                                            batch_size=batch_size,
                                                            workers=opt.workers, pin=True)
 
@@ -257,7 +269,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Start training
     t0 = time.time()
-    nw = max(round(hyp['warmup_epochs'] * nb), 800)  # number of warmup iterations, max(3 epochs, 1k iterations) 最少warmup三轮或500batch(原版1000,800就够了)
+    nw = max(round(hyp['warmup_epochs'] * nb), 500)  # number of warmup iterations, max(3 epochs, 1k iterations) 最少warmup三轮或500batch(原版1000,800就够了)
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
@@ -265,22 +277,16 @@ def train(hyp, opt, device, tb_writer=None):
     scaler = amp.GradScaler(enabled=cuda)  # 说明不是float16训练,而是16和32混合精度训练. 训练前初始化loss scaler 用于float16放大梯度后backward, optimizer.step之前自动转float32再缩回来
     compute_loss = ComputeLoss(model)  # init loss class 初始化检测criteria
   
-#-----------------------------------------------------------------------------------------------------------
-    # deeplab早期版本(无ohem)中对cityscapes数据集设定的weights,可用,非必要,现代更常用ohem，但目前ohem实验略差一点
-    # citys_class_weight=torch.tensor([0.8373, 0.9180, 0.8660, 1.0345, 1.0166, 
-    #                                  0.9969, 0.9754, 1.0489, 0.8786, 1.0023, 
-    #                                  0.9539, 0.9843, 1.1116, 0.9037, 1.0865, 
-    #                                  1.0955, 1.0865, 1.1529, 1.0507])
-    citys_class_weight = None
-
+# -----------------------------------------------------------------------------------------------------------
     # 无aux模型输出不用[],有aux几个结果输出用[]包装
     # Base，PSP和Lab用这个，无aux
-    compute_seg_loss = SegmentationLosses(aux=False, ignore_index=-1, weight=citys_class_weight).cuda()#SegFocalLoss(ignore_index=-1, gamma=1, reduction="mean").cuda() 
+    compute_seg_loss = SegmentationLosses(aux=False, ignore_index=-1, weight=None).cuda()
+    # compute_seg_loss = SegFocalLoss(ignore_index=-1, gamma=2, reduction="mean").cuda()
     # BiSe用这个　两个aux
-    # compute_seg_loss = SegmentationLosses(nclass=19, aux=True, aux_num=2, aux_weight=0.1, ignore_index=-1, weight=citys_class_weight).cuda()
+    # compute_seg_loss = SegmentationLosses(nclass=19, aux=True, aux_num=2, aux_weight=0.1, ignore_index=-1, weight=None).cuda()
     # 一个aux，没有用这个
-    # compute_seg_loss = SegmentationLosses(nclass=19, aux=True, aux_num=1, aux_weight=0.1, ignore_index=-1, weight=citys_class_weight).cuda()
-#-----------------------------------------------------------------------------------------------------------
+    # compute_seg_loss = SegmentationLosses(nclass=19, aux=True, aux_num=1, aux_weight=0.1, ignore_index=-1, weight=None).cuda()
+# -----------------------------------------------------------------------------------------------------------
 
     # focalloss别用，cityscapes效果不行
     # OHEM能用，理论上应该超过CE，但是目前实验效果不如CE(设成默认0.7收敛蛮快的但最终值不够好)，认为与计算像素个数和学习率有关，用的话循环损失计算的语句得改一下，接口和CE还没来得及保持一致
@@ -379,7 +385,7 @@ def train(hyp, opt, device, tb_writer=None):
 
             with amp.autocast(enabled=cuda):  # 混合精度训练中用来代替autograd
                 pred = model(segimgs)
-#-----------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------
                 # 无aux模型输出不用[],有aux模型几个结果输出用[]包装
                 # Base,PSP和Lab用这个,无aux
                 segloss = compute_seg_loss(pred[1], segtargets.to(device)) * batch_size # 分割loss CE是平均loss, 配合检测做梯度积累, 因此乘以batchsize(注意有梯度积累其真实batchsize约是nbs=64)  
@@ -387,7 +393,7 @@ def train(hyp, opt, device, tb_writer=None):
                 # segloss = compute_seg_loss(pred[1][0], pred[1][1], pred[1][2], segtargets.to(device)) * batch_size    
                 # 一个aux，没有用这个
                 # segloss = compute_seg_loss(pred[1][0], pred[1][1], segtargets.to(device)) * batch_size   
-#-----------------------------------------------------------------------------------------------------------                         
+# -----------------------------------------------------------------------------------------------------------
                 segloss *= seggain
             scaler.scale(segloss).backward()
             del segimgs

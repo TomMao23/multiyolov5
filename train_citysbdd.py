@@ -224,14 +224,23 @@ def train(hyp, opt, device, tb_writer=None):
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)  # anchor_t是最大放大倍数,yolov5公式不同于v3v4, 见核心Model推理时anchor偏移放缩公式和issue
             model.half().float()  # pre-reduce anchor precision 先转float16再转回32,虽然type是32,但此时参数的数值范围限到16了
 
-    # 分割 loader   citys和bdd的basesize都取1024,crop_size长边取imgsz,短边imgsz砍半
-        seg_valloader = SegmentationDataset.get_citys_loader(root=segval_path, batch_size=4,
-                                                         split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
-                                                         base_size=1024,   # 对cityscapes, 原图resize到(1024, 512)输入后双线性插值到原图尺寸计算精度
-                                                         # crop_size=640,  # testval 时候cropsize不起作用
+        # # 分割 loader   citys和bdd的basesize都取1024,crop_size长边取imgsz,短边imgsz砍半
+        # seg_valloader = SegmentationDataset.get_citysbdd_loader(root=segval_path, batch_size=4,
+        #                                                  split="val", mode="testval",  # 旧版为val新版训练中验证也用testval模式
+        #                                                  base_size=1024,   # 对cityscapes, 原图resize到(1024, 512)输入后双线性插值到原图尺寸计算精度
+        #                                                  # crop_size=640,  # testval 时候cropsize不起作用
+        #                                                  workers=4, pin=True)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
+        #                                                              # 我电脑上(4,4)是最快的, 更大子进程会挂(现在图大了,怎么设都会挂, BUG)
+        
+        # citysbdd改用val模式(图尺寸不同不能用testval)
+        seg_valloader = SegmentationDataset.get_citysbdd_loader(root=segval_path, batch_size=4,
+                                                         split="val", mode="val",  # 和train.py不同，使用val模式
+                                                         base_size=1024,   # val模式base_size无效
+                                                         # crop_size手动取，建议目标输入的短边尺寸，如cityscapes取512
+                                                         crop_size=512,  # 图尺寸不同，用val，按短边resize到cropsize再crop（cropsize，cropsize）
                                                          workers=4, pin=True)  # 验证batch_size和workers得配合, 都太大会导致子进程死亡, 单进程龟速加载数据
                                                                      # 我电脑上(4,4)是最快的, 更大子进程会挂(现在图大了,怎么设都会挂, BUG)
-    seg_trainloader = SegmentationDataset.get_citys_loader(root=segtrain_path,
+    seg_trainloader = SegmentationDataset.get_citysbdd_loader(root=segtrain_path,
                                                            split="train", mode="train",
                                                            base_size=1024, crop_size=(imgsz, imgsz//2),  # cropsize长边和检测同，短边砍半(针对cityscapes,bdd也行)
                                                            batch_size=batch_size,
@@ -266,7 +275,7 @@ def train(hyp, opt, device, tb_writer=None):
     compute_loss = ComputeLoss(model)  # init loss class 初始化检测criteria
   
 #-----------------------------------------------------------------------------------------------------------
-    # deeplab早期版本(无ohem)中对cityscapes数据集设定的weights,可用,非必要,现代更常用ohem，但目前ohem实验略差一点
+    # deeplab早期版本(无ohem)中对cityscapes数据集设定的weights,非必要,现代更常用ohem，但目前ohem实验略差一点
     # citys_class_weight=torch.tensor([0.8373, 0.9180, 0.8660, 1.0345, 1.0166, 
     #                                  0.9969, 0.9754, 1.0489, 0.8786, 1.0023, 
     #                                  0.9539, 0.9843, 1.1116, 0.9037, 1.0865, 

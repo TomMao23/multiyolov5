@@ -2,8 +2,8 @@
 # Created by: Hang Zhang
 # Email: zhang.hang@rutgers.edu
 # Copyright (c) 2017
-# 带标准数据加载增广的语义分割Dataset, Dataset类代码原作者张航, 详见其开发的库 PyTorch-Encoding, 在此基础上魔改了一些包括不均匀的长边采样,色彩变换,
-# 稍加修改即可加载BDD100k分割数据, 此处写了
+# 带标准数据加载增广的语义分割Dataset, Dataset类代码原作者张航, 详见其开发的github仓库PyTorch-Encoding, 在此基础上魔改了一些包括不均匀的长边采样,色彩变换,pad0改成了pad255(配合bdd的格式)
+# 稍加修改即可加载BDD100k分割数据, 此处写了Cityscapes+BDD100k混合训练，没加单独的BDD100k
 ###########################################################################
 
 import os
@@ -22,22 +22,26 @@ import matplotlib.pyplot as plt
 from random import choices
 
 
-@lru_cache(None)  # 目前每次调用参数都是一样的, 用cache加速, 有random的地方不能用cache
-def range_and_prob(base_size, low: float = 0.5,  high: float = 3, std: int = 25) -> list:
+@lru_cache(128)  # 目前每次调用参数都是一样的, 用cache加速, 有random的地方不能用cache
+def range_and_prob(base_size, low: float = 0.5,  high: float = 3.0, std: int = 25) -> list:
     low = math.ceil((base_size * low) / 32)
     high = math.ceil((base_size * high) / 32)
     mean = math.ceil(base_size / 32) - 4  # 峰值略偏
-    x = list(range(low, high + 1))
+    x = np.array(list(range(low, high + 1)))
     p = stats.norm.pdf(x, mean, std)
-    p = p / p.sum()  # choices权重不用归一化, 归一化用于debug和可视化调参std
-    return [x, p]
+    p = p / p.sum()  # 概率密度　choices权重不用归一化, 归一化用于debug和可视化调参std,以及用cum_weights优化
+    cum_p = np.cumsum(p)  # 概率分布，累加
+    # print("!!!!!!!!!!!!!!!!!!!!!!")
+    return (x, cum_p)
 
 
-def get_long_size(base_size:int, low: float = 0.5,  high: float = 4, std: int = 40) -> int:  # 用均值为basesize的正态分布模拟一个类似F分布的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
-    x, p = range_and_prob(base_size, low, high, std)
+# 用均值为basesize的正态分布模拟一个类似F分布图形的采样, 目的是专注于目标scale的同时见过少量大scale(通过apollo图天空同时不掉点)
+def get_long_size(base_size:int, low: float = 0.5,  high: float = 3.0, std: int = 40) -> int:  
+    x, cum_p = range_and_prob(base_size, low, high, std)
     # plt.plot(x, p)
     # plt.show()
-    longsize = choices(population=x, weights=p, k=1)[0] * 32
+    longsize = choices(population=x, cum_weights=cum_p, k=1)[0] * 32  # 用cum_weights O(logn)，　用weights O(n)
+    # print(longsize)
     return longsize
 
 
@@ -58,6 +62,7 @@ class BaseDataset(data.Dataset):
         if self.mode == 'train':
             print('BaseDataset: base_size {}, crop_size {}'. \
                 format(base_size, crop_size))
+            print(f"Random scale low: {self.low}, high: {self.high}, sample_std: {self.sample_std}")
 
     def __getitem__(self, index):
         raise NotImplemented
@@ -73,7 +78,7 @@ class BaseDataset(data.Dataset):
     def make_pred(self, x):
         return x + self.pred_offset
 
-    def _testval_img_transform(self, img):  # 新的训练后测验证集数据处理: 图长边resize到base_size, 但标签是原图, 若非原图需要测试时手动把输出放大到原图 (原版仅处理标签, 原图输入)
+    def _testval_img_transform(self, img):  # 新的训练后测验证集数据处理(仅支持同尺寸图): 图长边resize到base_size, 但标签是原图, 若非原图需要测试时手动把输出放大到原图 (原版仅处理标签, 原图输入)
         w, h = img.size
         outlong = self.base_size
         outlong = make_divisible(outlong, 32)  # 32是网络最大下采样倍数, 测试时自动使边为32倍数
@@ -88,7 +93,7 @@ class BaseDataset(data.Dataset):
         img = img.resize((ow, oh), Image.BILINEAR)
         return img
 
-    def _val_sync_transform(self, img, mask):  # 训练中验证数据处理: 把图短边resize成crop_size, 长边保持比例, 再crop一块用于验证(已废除)
+    def _val_sync_transform(self, img, mask):  # 训练中验证数据处理(支持不同尺寸图，但是指标通常比testval略低一点点): 把图短边resize成crop_size, 长边保持比例, 再crop一块(crop_size,crop_size)用于验证(在citysbdd和custom中图不同时候使用)
         outsize = self.crop_size
         short_size = outsize
         w, h = img.size
@@ -134,7 +139,7 @@ class BaseDataset(data.Dataset):
             padh = h_crop_size - oh if oh < h_crop_size else 0
             padw = w_crop_size - ow if ow < w_crop_size else 0
             img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
-            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=255)  # mask不填充0而是填255:类别0不是训练类别,后续会被填-1(但bdd100k数据格式是trainid)
+            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=255)  # mask不填充0而是填255:类别0不是训练类别,后续会被填-1(但bdd100k数据格式是trainid,为了兼容填255)
         # random crop 随机按crop_size从resize和pad的图上crop一块用于训练
         w, h = img.size
         x1 = random.randint(0, w - w_crop_size)
@@ -154,9 +159,9 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
 
     # mode训练时候验证用val, 测试验证集指标时候用testval一般会更高且更接近真实水平
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
-                 mode=None, transform=None, target_transform=None, low=0.6, high=3.0, sample_std=25, **kwargs):
+                 mode=None, transform=None, target_transform=None, **kwargs):
         super(CitySegmentation, self).__init__(
-            root, split, mode, transform, target_transform, low=0.6, high=3, sample_std=25, **kwargs)
+            root, split, mode, transform, target_transform, **kwargs)
         # self.root = os.path.join(root, self.BASE_DIR)
         self.images, self.mask_paths = get_city_pairs(self.root, self.split)
         assert (len(self.images) == len(self.mask_paths))
@@ -231,9 +236,9 @@ class CitySegmentation(BaseDataset):  # base_size 2048 crop_size 768
 class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
     # mode训练时候验证用testval, 测试验证集指标时候也用testval, val倍废弃
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
-                 mode=None, transform=None, target_transform=None, low=0.6, high=2.0, sample_std=35, NUM_CLASS=19, **kwargs):
+                 mode=None, transform=None, target_transform=None, NUM_CLASS=19, **kwargs):
         super(CityBddSegmentation, self).__init__(
-            root, split, mode, transform, target_transform, low=0.6, high=2, sample_std=35, **kwargs)
+            root, split, mode, transform, target_transform, **kwargs)
         # self.root = os.path.join(root, self.BASE_DIR)
         self.images, self.mask_paths = get_city_pairs(self.root, self.split)
         assert (len(self.images) == len(self.mask_paths))
@@ -322,9 +327,9 @@ class CityBddSegmentation(BaseDataset):  # base_size 2048 crop_size 768
 class CustomSegmentation(BaseDataset):  # base_size 2048 crop_size 768
     # mode训练时候验证用testval, 测试验证集指标时候也用testval, val倍废弃
     def __init__(self, root=os.path.expanduser('../data/citys/'), split='train',
-                 mode=None, transform=None, target_transform=None, low=0.6, high=2.0, sample_std=35, **kwargs):
+                 mode=None, transform=None, target_transform=None, **kwargs):
         super(CustomSegmentation, self).__init__(
-            root, split, mode, transform, target_transform, low=0.6, high=2, sample_std=35, **kwargs)
+            root, split, mode, transform, target_transform, **kwargs)
         # self.root = os.path.join(root, self.BASE_DIR)
         self.images, self.mask_paths = get_custom_pairs(self.root, self.split)
         assert (len(self.images) == len(self.mask_paths))
@@ -456,7 +461,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
     if mode == "train":
         input_transform = transforms.Compose([
             transforms.ColorJitter(brightness=0.45, contrast=0.45,
-                                   saturation=0.45, hue=0.1),
+                                   saturation=0.45, hue=0.15),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
@@ -467,7 +472,7 @@ def get_citys_loader(root=os.path.expanduser('data/citys/'), split="train", mode
         ])
     dataset = CitySegmentation(root=root, split=split, mode=mode,
                                transform=input_transform,
-                               base_size=base_size, crop_size=crop_size, low=0.6, high=3, sample_std=25)
+                               base_size=base_size, crop_size=crop_size, low=0.65, high=3, sample_std=25)
 
     loader = data.DataLoader(dataset, batch_size=batch_size,
                              drop_last=  False, shuffle=True if mode == "train" else False,
@@ -480,8 +485,8 @@ def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", m
                      batch_size=32, workers=4, pin=True):
     if mode == "train":
         input_transform = transforms.Compose([
-            transforms.ColorJitter(brightness=0.45, contrast=0.45,
-                                   saturation=0.45, hue=0.1),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4,
+                                   saturation=0.4, hue=0.05),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
@@ -492,7 +497,7 @@ def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", m
         ])
     dataset = CityBddSegmentation(root=root, split=split, mode=mode,
                                transform=input_transform,
-                               base_size=base_size, crop_size=crop_size, low=0.6, high=1.5, sample_std=35)
+                               base_size=base_size, crop_size=crop_size, low=0.65, high=2, sample_std=40)
 
     loader = data.DataLoader(dataset, batch_size=batch_size,
                              drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,
@@ -500,13 +505,14 @@ def get_citysbdd_loader(root=os.path.expanduser('data/citys/'), split="train", m
     return loader
 
 
+# 默认custom_loader　jitter和crop采用更保守的方案
 def get_custom_loader(root=os.path.expanduser('data/citys/'), split="train", mode="train",  # 获取训练和验证用的dataloader
-                     base_size=1024,  # crop_size=(1024, 1024), 注意 Custom的corpsize=basesize
+                     base_size=1024,  # crop_size=(1024, 1024), 注意 custom的corpsize=basesize
                      batch_size=32, workers=4, pin=True):
     if mode == "train":
         input_transform = transforms.Compose([
-            transforms.ColorJitter(brightness=0.45, contrast=0.45,
-                                   saturation=0.45, hue=0.1),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4,
+                                   saturation=0.4, hue=0),
             transforms.ToTensor(),
             # transforms.Normalize([.485, .456, .406], [.229, .224, .225])  # 为了配合检测预处理保持一致, 分割不做norm
         ])
@@ -517,7 +523,7 @@ def get_custom_loader(root=os.path.expanduser('data/citys/'), split="train", mod
         ])
     dataset = CustomSegmentation(root=root, split=split, mode=mode,
                                transform=input_transform,
-                               base_size=base_size, crop_size=(base_size, base_size), low=0.6, high=2, sample_std=35)
+                               base_size=base_size, crop_size=(base_size, base_size), low=0.75, high=1.5, sample_std=35)
 
     loader = data.DataLoader(dataset, batch_size=batch_size,
                              drop_last=True if mode == "train" else False, shuffle=True if mode == "train" else False,
@@ -526,11 +532,11 @@ def get_custom_loader(root=os.path.expanduser('data/citys/'), split="train", mod
 
 
 if __name__ == "__main__":
-    t = transforms.Compose([  # 用于测试色彩和大小裁剪变换是否合理
+    t = transforms.Compose([  # 用于打断点时候测试色彩和大小裁剪变换是否合理
         transforms.ColorJitter(brightness=0.45, contrast=0.45,
                                saturation=0.45, hue=0.1)])
     # trainloader = get_citys_loader(root='./data/citys/', split="val", mode="train", base_size=1024, crop_size=(832, 416), workers=0, pin=True, batch_size=4)
-    trainloader = get_custom_loader(root='./data/customdata/', split="train", mode="train", base_size=1024, workers=0, pin=True, batch_size=4)
+    trainloader = get_custom_loader(root='./data/customdata/', split="train", mode="train", base_size=832, workers=0, pin=True, batch_size=4)
 
     import time
     t1 = time.time()

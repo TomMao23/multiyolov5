@@ -16,7 +16,7 @@ from utils.plots import plot_one_box
 from utils.torch_utils import select_device, load_classifier, time_synchronized
 import numpy as np
 
-Cityscapes_COLOMAP = [
+Cityscapes_COLORMAP = [
     [128, 64, 128],
     [244, 35, 232],
     [70, 70, 70],
@@ -66,12 +66,12 @@ Cityscapes_Class = ["road", "sidewalk", "building", "wall", "fence",
                "bus", "train", "motorcycle", "bicyle"]
 
 
-def label2image(pred, COLORMAP=Cityscapes_COLOMAP):
+def label2image(pred, COLORMAP=Cityscapes_COLORMAP):
     colormap = np.array(COLORMAP, dtype='uint8')
     X = pred.astype('int32')
     return colormap[X, :]
 
-def id2trainid(pred, IDMAP=Cityscapes_IDMAP):
+def trainid2id(pred, IDMAP=Cityscapes_IDMAP):
     colormap = np.array(IDMAP, dtype='uint8')
     X = pred.astype('int32')
     return colormap[X, :]
@@ -120,6 +120,9 @@ def detect(save_img=False):
         cudnn.benchmark = False
         dataset = LoadImages(source, img_size=imgsz, stride=stride)  # 跑的是这个
 
+    if opt.submit or opt.save_as_video:  # 提交和做视频必定是同尺寸
+        cudnn.benchmark = True
+        
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
     colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
@@ -187,7 +190,7 @@ def detect(save_img=False):
             # seg = seg[0]
             seg = F.interpolate(seg, (im0.shape[0], im0.shape[1]), mode='bilinear', align_corners=True)[0]
 
-            mask = label2image(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_COLOMAP)[:, :, ::-1]
+            mask = label2image(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_COLORMAP)[:, :, ::-1]
             dst = cv2.addWeighted(mask, 0.4, im0, 0.6, 0)
 
             # Stream results
@@ -200,7 +203,7 @@ def detect(save_img=False):
             if opt.submit:
                 sub_path = sub_dir+str(p.name)
                 sub_path = sub_path[:-4] + "_pred.png"
-                result = id2trainid(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_IDMAP)
+                result = trainid2id(seg.max(axis=0)[1].cpu().numpy(), Cityscapes_IDMAP)
                 cv2.imwrite(sub_path, result)
             # Save results (image with detections)
             if save_img:
