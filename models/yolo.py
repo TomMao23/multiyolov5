@@ -103,16 +103,17 @@ class SegMaskLab(nn.Module):  #   配置文件[3, 16, 19, 22], 通道配置无�
         self.encoder = nn.Sequential(
                                 # hid砍得越少精度越高(这里问题在容量)，maep_reduce=1相当于标准ASPP
                                 # 未使用全局，一方面遵照论文，一方面用了全局后出现边界破碎的情况
-                                # ASPP(c_hid*2, 256, d=[4, 7, 10], has_globel=False, map_reduce=5-n), # ASPP确实好，但是太重了，砍到了1/4通道 s:5-1=4, m:5-2=3, l:5-3=2
+                                Conv(self.c_in16, c_hid*2, k=1),
+                                ASPP(c_hid*2, 256, d=[3, 6, 9], has_globel=False, map_reduce=5-n),  # ASPP确实好，但是太重了，砍到了1/4通道 s:5-1=4, m:5-2=3, l:5-3=2
                                 # 这两个都是ASPP的替代品, ASPP也有一个问题，光一个ASPP不够深，ASPPs和RFB1中间输入一起砍，ASPPs砍完可以选择前面加其他模块，RFB1砍后增加了3*3和5*5
                                 # ASPPs(256, 256, d=[4, 7, 10], has_globel=False, map_reduce=5-n), # 
-                                RFB1(self.c_in16, 256, d=[3, 5, 7], has_globel=False, map_reduce=max(4-n, 2)),
+                                # RFB1(self.c_in16, 256, d=[3, 5, 7], has_globel=False, map_reduce=max(4-n, 2)),
                                 nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
                                )
         self.decoder = nn.Sequential(
                                # 原论文两个3*3保持256(文中实验表示保持256最重要，其次是3*3)，此处为了速度还是得砍到128(第一个融合处想继续用3*3保证深浅融合效果)
-                               FFM(256+48, c_hid, k=3, is_cat=True),  # 融合用bisenet的配置
-                               Conv(c_hid, c_hid, k=3),  # 经验是不管多宽，k取3还是1，用三层融合输出(有浅层融合)
+                               FFM(256+48, 256, k=1, is_cat=True),  # 融合用bisenet的配置
+                               Conv(256, c_hid, k=3),  # 经验是不管多宽，k取3还是1，用三层融合输出(有浅层融合)
                                nn.Conv2d(c_hid, self.c_out, kernel_size=1, padding=0),
                                nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
                                 )
@@ -120,7 +121,6 @@ class SegMaskLab(nn.Module):  #   配置文件[3, 16, 19, 22], 通道配置无�
     def forward(self, x):
         feat16 = self.encoder(x[1])  # 1/16主语义
         feat8 = self.detail(x[0])  # 1/8浅层
-        # return self.decoder([feat8, feat16]) if not self.training else [self.decoder([feat8, feat16]), self.aux(x[1])]
         return self.decoder([feat8, feat16])
 
 
