@@ -21,7 +21,7 @@ In the semantic segmentation section, I refer to the following code:
 #### (a) Environment
 直接使用主分支BS2021或最新tag（tag均为稳定版）
 ```bash
-$ git checkout TomMao-2.0 
+$ git checkout TomMao-2.1 
 ```
 ```bash
 $ python -m pip install -r requirements.txt  
