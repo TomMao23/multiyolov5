@@ -1,7 +1,7 @@
 # Multi YOLO V5——Detection and Semantic Segmentation
 ## Overeview
 This is my undergraduate graduation project which based on <a href="https://github.com/ultralytics/yolov5"> ultralytics YOLO V5 tag v5.0</a>.  
-This multi-task model adds only a small amount of computation and inferential GPU memory (about 350MB) and is able to accomplish both object detection and semantic segmentation. Object detection metrics are slightly improved (compared to single-task YOLO) on my dataset (transfer from Cityscapes Instance Segmentation labels) and Cityscapes semantic segmentation metrics are shown below. **This repository will not be updated in the near future(after tag TomMao-2.0 realse)** and feature version will **probably** be released to [MANA AI](http://www.manaai.cn). To save my time and facilitate handover, please forgive me for the following document will be written in Chinese.  
+This multi-task model adds only a small amount of computation and inferential GPU memory (about 350MB) and is able to accomplish both object detection and semantic segmentation. Object detection metrics are slightly improved (compared to single-task YOLO) on my dataset (transfer from Cityscapes Instance Segmentation labels) and Cityscapes semantic segmentation metrics are shown below. **This repository will not be updated in the near future(after tag TomMao-2.0 realse)** and future version will **probably** be released to [MANA AI](http://www.manaai.cn). To save my time and facilitate handover, please forgive me for the following document will be written in Chinese.  
 [Demo Video](https://www.bilibili.com/video/BV1Yv411p7Js)  
 ![avatar](./githubimage/37.jpg)  
 In the semantic segmentation section, I refer to the following code:
