@@ -1,6 +1,6 @@
 # parameters
 nc: 10  # number of classes
-n_segcls: 19 # 多一个分割类别数, 如果用新代码也可以训练老配置, 可以没SegMask但要随便设个n_segcls
+n_segcls: 19 # 分割类别数
 depth_multiple: 0.67  # model depth multiple
 width_multiple: 0.75  # layer channel multiple
 
@@ -44,7 +44,7 @@ head:
    [-1, 1, Conv, [512, 3, 2]],
    [[-1, 10], 1, Concat, [1]],  # cat head P5
    [-1, 3, C3, [1024, False]],  # 23 (P5/32-large)
-                  #[类别/输出通道, C3的n, C3的c2, C3的shortcut] yolo.py解析代码, []内第一项必须是输出通道数
+                  #[类别/输出通道, C3的n, C3的c2, C3的shortcut(以base为例，其他头含义可能不同)] yolo.py解析代码, []内第一项必须是输出通道数
    #[[4, 19], 1, SegMaskLab, [n_segcls, 3, 256, False]],  # 语义分割头通道配置256,[]内n为３
    [[16, 19, 22], 1, SegMaskPSP, [n_segcls, 3, 256, False]],  # 语义分割头通道配置256
    #[[16, 19, 22], 1, SegMaskBiSe, [n_segcls, 3, 256, False]],  # 语义分割头通道配置无效
