@@ -19,7 +19,7 @@ In the semantic segmentation section, I refer to the following code:
 ## Doc
 ### 0. Before Start 环境配置和数据集准备
 #### (a) Environment
-直接使用主分支BS2021或最新tag（tag均为稳定版）
+直接使用主分支BS2021或最新tag（tag均为稳定版,目前更建议直接用主分支，近期不会再更新功能和结构，但如果issue提出BUG会尽力在主分支修复）
 ```bash
 $ git checkout TomMao-2.1 
 ```
@@ -52,22 +52,22 @@ pspv5s.pt表示psp头的yolov5s模型，pspv5m.pt表示yolov5m其他几个命名
 ### 1. Inference 推理图片、视频,用连续帧制作视频,向Cityscapes提交，测速
 #### (a) 普通图片推理
 ```bash
-$ python detect.py --weights ./labv5s.pt或其他模型 --source data/images --conf 0.25 --img-size 1024  
+$ python detect.py --weights ./pspv5s.pt或其他模型 --source data/images --conf 0.25 --img-size 1024  
 ```
 data/images里几张图片来自cityscapes测试集、bdd100k、apollo scape和yolo。此外data/test_imgs放了一些apollo的图，可以看看cityscapes训练后在apollo上的效果(使用了bdd100k训练的效果会再好一点)  
 结果图片在runs/detect文件夹中，也可以推理同时显示。  
 ```bash
-$ python detect.py --weights ./labv5s.pt或其他模型 --source data/images --conf 0.25 --img-size 1024 --view-img  
+$ python detect.py --weights ./pspv5s.pt或其他模型 --source data/images --conf 0.25 --img-size 1024 --view-img  
 ```
 同原版YOLOV5，--weights写你的pt文件，--source写图片文件夹或者视频文件的路径，--conf检测阈值，--img-size为resize到模型的目标长边尺寸  
 #### (b) 同尺寸连续帧图片制作视频
 ```bash
-$ python detect.py --weights ./labv5s.pt或其他模型 --source 图片文件夹 --conf 0.25 --img-size 1024 --save-as-video  
+$ python detect.py --weights ./pspv5s.pt或其他模型 --source 图片文件夹 --conf 0.25 --img-size 1024 --save-as-video  
 ```
 我只写了同尺寸图片制作视频的支持(例如Cityscapes提供的三段连续帧测试图片，bilibili的demo视频就是这些图)，把你的图片放入同一文件夹内，注意若存在不同尺寸图片则结果视频会保存失败，若开了--no-save视频保存的图不会画结果(别开)    
 #### (c) 向Cityscapes提交测试集结果
 ```bash
-$ python detect.py --weights ./labv5s.pt或其他模型 --source 图片文件夹 --conf 0.25 --img-size 1024 --submit --no-save  
+$ python detect.py --weights ./pspv5s.pt或其他模型 --source 图片文件夹 --conf 0.25 --img-size 1024 --submit --no-save  
 ```
 开了--no-save不保存结果会快很多并省空间，把测试集6个文件夹的图片合并在一个文件夹进行推理，结束后会在此次的runs/detect/此次exp里找到一个results文件夹，里面是将trainid转换为id的结果，压缩上传官网即可  
 也可以分别推理6个文件夹，结果合并压缩上传  
@@ -77,13 +77,13 @@ $ python detect.py --weights ./labv5s.pt或其他模型 --source 图片文件夹
 yolov5默认使用float16推理，在20和30系列显卡差别不会很大，但在10和16系列显卡上不开cudnn.benchmark会慢非常多，因此建议测速在cudnn.benchmark开启时候测   
 ### 2. Test 训练后测试模型
 ```bash
-$ python test.py --data cityscapes_det.yaml --segdata ./data/citys --weights ./labv5s.pt --img-size 1024 --base-size 1024
+$ python test.py --data cityscapes_det.yaml --segdata ./data/citys --weights ./pspv5s.pt --img-size 1024 --base-size 1024
 ```
 对比原版多两个参数: --segdata后写Cityscapes数据集的文件夹地址(现在只支持这个，可以参考SegmentationDataset.py自行扩展)  
 检测长边和分割长边参数分离，--img-size是检测长边 --base-size是分割长边,我的配置是把Cityscapes放在1024*512尺寸下推理，比较能兼顾速度精度，训练也是以此为目的调参的.  
 如果训练后测试你自己的数据集，用test_custom.py（训练中train_custom.py会测）  
 ```bash
-$ python test_custom.py --data 你的.yaml --segdata 你的分割数据路径 --weights ./labv5s.pt --img-size 1024 --base-size 1024
+$ python test_custom.py --data 你的.yaml --segdata 你的分割数据路径 --weights ./pspv5s.pt --img-size 1024 --base-size 1024
 ```
 ### 3. Train 如何复现我的结果
 训练前先下载对应的原版(注意我是在tag V5.0代码上改的)COCO预训练模型做初始化，见原版readme和weights/download_weights.sh脚本
