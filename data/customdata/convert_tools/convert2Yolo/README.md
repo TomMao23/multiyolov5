@@ -1,4 +1,5 @@
 # Convert2Yolo
+用于转yolov5格式，原仓库： https://github.com/ssaru/convert2Yolo   
 
 Object Detection annotation Convert to [Yolo Darknet](https://pjreddie.com/darknet/yolo/) Format
 

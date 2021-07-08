@@ -1,7 +1,7 @@
 # Multi YOLO V5——Detection and Semantic Segmentation
 ## Overeview
 This is my undergraduate graduation project which based on <a href="https://github.com/ultralytics/yolov5"> ultralytics YOLO V5 tag v5.0</a>.  
-This multi-task model adds only a small amount of computation and inferential GPU memory (about 350MB) and is able to accomplish both object detection and semantic segmentation. Object detection metrics are slightly improved (compared to single-task YOLO) on my dataset (transfer from Cityscapes Instance Segmentation labels) and Cityscapes semantic segmentation metrics are shown below. **This repository will not be updated in the near future(after tag TomMao-2.0 realse)** and a **more engineered version** will probably be released to [MANA AI](http://www.manaai.cn). To save my time and facilitate handover, please forgive me for the following document will be written in Chinese.  
+This multi-task model adds only a small amount of computation and inferential GPU memory (about 350MB) and is able to accomplish both object detection and semantic segmentation. Object detection metrics are slightly improved (compared to single-task YOLO) on my dataset (transfer from Cityscapes Instance Segmentation labels) and Cityscapes semantic segmentation metrics are shown below. **This repository will not be updated in the near future(after tag TomMao-2.0 realse)** and feature version will **probably** be released to [MANA AI](http://www.manaai.cn). To save my time and facilitate handover, please forgive me for the following document will be written in Chinese.  
 [Demo Video](https://www.bilibili.com/video/BV1Yv411p7Js)  
 ![avatar](./githubimage/37.jpg)  
 In the semantic segmentation section, I refer to the following code:
@@ -10,7 +10,7 @@ In the semantic segmentation section, I refer to the following code:
 3. [ycszen/TorchSeg: Fast, modular reference implementation and easy training of Semantic Segmentation algorithms in PyTorch. (github.com)](https://github.com/ycszen/TorchSeg)  
 4. [YudeWang/semantic-segmentation-codebase: Codebase for semantic segmentation experiments (github.com)](https://github.com/YudeWang/semantic-segmentation-codebase)  
 
-这是我的本科毕设，基于ultralytics/yolov5多任务模型。以增加少量计算和显存为代价，同时完成目标检测和语义分割(1024×512输入约增加350MB，同尺寸增加一个bisenet需要约1.3GB，两个单任务模型独立输入还有额外的延时)。模型在Cityscapes语义分割数据集和由Cityscapes实例分割标签转换来的目标检测数据集上同时训练，检测结果略好于原版单任务的YOLOV5(仅限于此实验数据集)，分割指标s模型验证集mIoU 0.73，测试集0.715；ｍ模型验证集mIoU 0.75测试集0.735。由于将继续考研，tag 2.0发布后仓库近期不会再更新，issue大概率不会回复(问题请参考以下Doc，震荡爆炸请尝试砍学习率)，未来版本可能由其他人整理/重构发布在[MANA AI](http://www.manaai.cn)。模型测试集指标和速度对比如上图(对比不完全公平，我用了yolo官方的COCO检测预训练模型，训练中使用了检测数据，但推理时会比以上模型多跑一个检测头)，可视化如下图：  
+这是我的本科毕设，基于ultralytics/yolov5多任务模型。以增加少量计算和显存为代价，同时完成目标检测和语义分割(1024×512输入约增加350MB，同尺寸增加一个bisenet需要约1.3GB，两个单任务模型独立输入还有额外的延时)。模型在Cityscapes语义分割数据集和由Cityscapes实例分割标签转换来的目标检测数据集上同时训练，检测结果略好于原版单任务的YOLOV5(仅限于此实验数据集)，分割指标s模型验证集mIoU 0.73，测试集0.715；ｍ模型验证集mIoU 0.75测试集0.735。由于将继续考研，tag 2.0发布后仓库近期不会再频繁更新，issue大概率不会回复(问题请参考以下Doc，震荡爆炸请尝试砍学习率。若后续考上研应该会在本仓库跟进yolov5的更新并尝试新分割结构、增加更多任务、多卡训练和部署的支持)，未来版本**可能**由其他人整理/重构发布在[MANA AI](http://www.manaai.cn)。模型测试集指标和速度对比如上图(对比不完全公平，我用了yolo官方的COCO检测预训练模型，训练中使用了检测数据，但推理时会比以上模型多跑一个检测头)，可视化如下图：  
 效果视频见[bilibili demo video](https://www.bilibili.com/video/BV1Yv411p7Js)  
 ![avatar](./githubimage/40.png)  
 ![avatar](./githubimage/43.jpg)  
@@ -19,10 +19,7 @@ In the semantic segmentation section, I refer to the following code:
 ## Doc
 ### 0. Before Start 环境配置和数据集准备
 #### (a) Environment
-直接使用主分支BS2021或最新tag（tag均为稳定版,目前更建议直接用主分支，近期不会再更新功能和结构，但如果issue提出BUG会尽力在主分支修复）
-```bash
-$ git checkout TomMao-2.1 
-```
+目前建议直接用主分支BS2021，近期不会再更新功能和结构，但如果issue提出BUG空闲时候会尽力在主分支修复   
 ```bash
 $ python -m pip install -r requirements.txt  
 $ python -m pip uninstall wandb  
@@ -47,7 +44,7 @@ $ mv ./labels ./detdata
 **lab.pt** 模仿DeepLabV3+的分割头，验证集精度与psp和bise接近，速度略慢于psp和base，与bise相仿。4(或3),19(浅层1/8,PAN的1/16)输入，配置文件通道256。1/8图1×1卷积到48通道，1/16图过RFB1(ASPP类似的替代)。DeepLabV3+解码器部分用了浅层1/4和深层1/16，这里是1/8和1/16因为YOLO 1/4图通道数太少且太浅，并联后不3×3refine会比较破碎，refine则计算量太大。论文提到浅层大分辨率图通道少更利于训练，同论文到48。论文提到VOC用了ASPP全局更好，Cityscapes用了全局更差，这里未使用全局（实验中用了全局边缘会比较破碎，psp却是用了全局更好）。相比DeepLab解码器部分这里多了FFM注意力融合结构，为了用3×3砍了一点隐层减少计算量。   
 **psp.pt** 模仿PSPNet的分割头,目前精度最高，速度仅次于base。16,19,22三层融合输入，未找到合适的地方放辅助损失，放弃辅助损失  
 **[Pretrained Model百度网盘](https://pan.baidu.com/s/19z-g_TsC7YtmRiX5G568zg)** 提取码**cjxg**    
-pspv5s.pt表示psp头的yolov5s模型，pspv5m.pt表示yolov5m其他几个命名同理，预训练模型均是用上述cityscapes分割数据和实例分割生成的检测数据训练的，19个分割类，10个检测类。pspv5m_citybdd_conewaterbarrier.pt这个模型的分割部分使用了bdd100k和cityscapes两个数据集混合，检测部分数据不开放，各种车辆均归为vehicle，pedestrain和rider均归为person，bike和motorcycle均归为cycle，另有三角锥cone和水马waterbarrier类别。  
+pspv5s.pt表示psp头的yolov5s模型，pspv5m.pt表示yolov5m其他几个命名同理，预训练模型多是用上述cityscapes分割数据和实例分割生成的检测数据训练的，19个分割类，10个检测类。pspv5m_citybdd_conewaterbarrier.pt这个模型的分割部分使用了bdd100k和cityscapes两个数据集混合，检测部分数据不开放，各种车辆均归为vehicle，pedestrain和rider均归为person，bike和motorcycle均归为cycle，另有三角锥cone和水马waterbarrier类别。  
 
 ### 1. Inference 推理图片、视频,用连续帧制作视频,向Cityscapes提交，测速
 #### (a) 普通图片推理
