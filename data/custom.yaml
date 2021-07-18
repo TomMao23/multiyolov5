@@ -10,17 +10,16 @@
 # download: https://github.com/ultralytics/yolov5/releases/download/v1.0/coco128.zip
 
 # train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
-# 私有数据集提供预训练模型不提供数据,可以替换为你的检测数据集或是cityscapes_det.yaml中来用实例分割标签转的检测数据路径
+
 train: ./data/customdata/detdata/images/train/  
 val: ./data/customdata/detdata/images/val/  
+
 # 分割数据集路径，分割类别个数定义在model配置里
-# 把bdd100k分割数据集当做一个城市组织在cityscapes内，标注格式不同,用train_citysbdd.py会自动解析
 segtrain: ./data/customdata
 segval: ./data/customdata
 # number of detection classes
 nc: 1
 # class names
-# vehicle包括car,truck和bus  person包括pedestrian和rider  cycle包括bike和motorcycle
 names: ['crack']
 
 # Cityscapes
